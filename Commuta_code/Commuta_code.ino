@@ -1,10 +1,3 @@
-// Test file for breadboard wiring including:
-// HUZZAH32,
-// SPS30 (PM1.0, PM2.5, PM4.0, PM10),
-// SCD40 (CO2, Temperature, Humidity),
-// and DPS310 (Air Pressure).
-// All outputs are raw readings.
-
 #include <Wire.h>
 #include <Adafruit_DPS310.h>
 #include <SensirionI2cScd4x.h>

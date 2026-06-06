@@ -18,7 +18,7 @@ void setup() {
   Serial.println("Air Quality Monitor - Test");
 
   // Start I2C
-  Wire.begin(23, 22); // SDA, SCL
+  Wire.begin(23, 22);  // SDA, SCL
 
   // Init SPS30
   sps30.begin(Wire, 0x69);
@@ -30,10 +30,10 @@ void setup() {
   }
 
   // Init DPS310
-  if (!dps.begin_I2C()) {
-    Serial.println("DPS310 not found!");
+  if (!dps.begin_I2C(0x76)) {
+    Serial.println("DPS368 not found!");
   } else {
-    Serial.println("DPS310 OK");
+    Serial.println("DPS368 OK");
     dps.configurePressure(DPS310_64HZ, DPS310_64SAMPLES);
     dps.configureTemperature(DPS310_64HZ, DPS310_64SAMPLES);
   }

@@ -1,4 +1,4 @@
-package com.example.commuta_app
+package com.annie.commuta_app
 
 import io.flutter.embedding.android.FlutterActivity
 

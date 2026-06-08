@@ -7,6 +7,7 @@ class AirQualityReading {
   final double temperature;
   final double humidity;
   final double pressure;
+  final double? pressureChangePaPerSec; // null on first reading (no prior to compare)
   final double? nox;     // nullable — SGP41 not yet wired up
   final double? tvoc;    // nullable — SGP41 not yet wired up
   final String sourceFlag; // 'live' | 'buffered' | 'mock'
@@ -25,6 +26,7 @@ class AirQualityReading {
     required this.temperature,
     required this.humidity,
     required this.pressure,
+    this.pressureChangePaPerSec,
     this.nox,
     this.tvoc,
     required this.sourceFlag,

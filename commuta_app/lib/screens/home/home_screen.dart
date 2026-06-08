@@ -61,7 +61,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _buildDashboard() {
     final reading = _latestReading!;
-    final overallDaqi = DaqiUtils.overallDaqi(reading.pm25, reading.pm10);
 
     return RefreshIndicator(
       color: AppColours.accent,
@@ -78,11 +77,8 @@ class _HomeScreenState extends State<HomeScreen> {
             padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
             sliver: SliverList(
               delegate: SliverChildListDelegate([
-                // ── Hero DAQI card ───────────────────────────────────────
-                _HeroDaqiCard(
-                  daqiInfo:    overallDaqi,
-                  lastUpdated: reading.timestamp,
-                ),
+                // ── Hero card: Overall Air Quality (Annie's custom score) ──
+                _OverallAirQualityCard(lastUpdated: reading.timestamp),
 
                 const SizedBox(height: 20),
 
@@ -91,13 +87,29 @@ class _HomeScreenState extends State<HomeScreen> {
 
                 const SizedBox(height: 12),
 
-                // ── Metric cards grid ────────────────────────────────────
+                // ── Metric cards grid (from device) ──────────────────────
                 _MetricGrid(reading: reading, onInfoTap: _showInfoSheet),
 
-                const SizedBox(height: 20),
+                const SizedBox(height: 24),
 
-                // ── Local weather + outdoor AQI card ─────────────────────
-                const _WeatherCard(),
+                // ── Section label for API cards ──────────────────────────
+                const _SectionLabel(text: 'Local context'),
+
+                const SizedBox(height: 12),
+
+                // ── UK DAQI card (from API) ──────────────────────────────
+                _UkDaqiCard(onInfoTap: () => _showApiInfoSheet(
+                  label: 'UK DAQI',
+                  unit:  '',
+                )),
+
+                const SizedBox(height: 12),
+
+                // ── Local Weather card (from API) ────────────────────────
+                _LocalWeatherCard(onInfoTap: () => _showApiInfoSheet(
+                  label: 'Local Weather',
+                  unit:  '',
+                )),
               ]),
             ),
           ),
@@ -107,33 +119,46 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _showInfoSheet({
-    required String label,
+    required String infoSheetLabel,
     required String unit,
-    required String? value,
+    required double? numericValue,
     required DaqiInfo? daqiInfo,
+    required BandScaleSpec? scaleSpec,
+    required MetricExtractor extractor,
   }) {
     MetricInfoSheet.show(
       context,
-      metricLabel:  label,
-      unit:         unit,
-      currentValue: value,
-      daqiInfo:     daqiInfo,
+      metricLabel:         infoSheetLabel,
+      unit:                unit,
+      initialNumericValue: numericValue,
+      initialDaqiInfo:     daqiInfo,
+      scaleSpec:           scaleSpec,
+      dataSource:          _dataSource,
+      extractor:           extractor,
+    );
+  }
+
+  void _showApiInfoSheet({
+    required String label,
+    required String unit,
+  }) {
+    // API-driven cards have no live device data — no dataSource/extractor passed.
+    MetricInfoSheet.show(
+      context,
+      metricLabel: label,
+      unit:        unit,
     );
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Hero DAQI card
+// Hero card: Overall Air Quality (custom score, future work)
 // ─────────────────────────────────────────────────────────────────────────────
 
-class _HeroDaqiCard extends StatelessWidget {
-  final DaqiInfo daqiInfo;
+class _OverallAirQualityCard extends StatelessWidget {
   final DateTime lastUpdated;
 
-  const _HeroDaqiCard({
-    required this.daqiInfo,
-    required this.lastUpdated,
-  });
+  const _OverallAirQualityCard({required this.lastUpdated});
 
   String _formatTime(DateTime dt) {
     final h = dt.hour.toString().padLeft(2, '0');
@@ -160,16 +185,16 @@ class _HeroDaqiCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // ── Label ────────────────────────────────────────────────────────
+          // ── Title ─────────────────────────────────────────────────────────
           Row(
             children: [
               const Text(
                 'Overall Air Quality',
                 style: TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w500,
-                  color: AppColours.textSecondary,
-                  letterSpacing: 0.2,
+                  fontSize: 17,
+                  fontWeight: FontWeight.w700,
+                  color: AppColours.textPrimary,
+                  letterSpacing: 0.1,
                 ),
               ),
               const Spacer(),
@@ -183,132 +208,56 @@ class _HeroDaqiCard extends StatelessWidget {
             ],
           ),
 
-          const SizedBox(height: 14),
+          const SizedBox(height: 32),
 
-          // ── Band name ────────────────────────────────────────────────────
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              // Colour swatch circle
-              Container(
-                width: 14,
-                height: 14,
-                margin: const EdgeInsets.only(right: 10),
-                decoration: BoxDecoration(
-                  color: daqiInfo.colour,
-                  shape: BoxShape.circle,
+          // ── Placeholder: custom score (Annie's future algorithm) ─────────
+          // TODO: Replace this placeholder with Annie's custom commuter-weighted
+          //       air-quality score once the algorithm is designed.
+          Center(
+            child: Column(
+              children: [
+                Text(
+                  '—',
+                  style: TextStyle(
+                    fontSize: 48,
+                    fontWeight: FontWeight.w300,
+                    color: AppColours.textSecondary.withValues(alpha: 0.6),
+                    height: 1.0,
+                  ),
                 ),
-              ),
-              Text(
-                daqiInfo.label,
-                style: TextStyle(
-                  fontSize: 36,
-                  fontWeight: FontWeight.w700,
-                  color: daqiInfo.colour,
-                  height: 1.0,
+                const SizedBox(height: 6),
+                Text(
+                  'Custom score coming soon',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: AppColours.textSecondary.withValues(alpha: 0.8),
+                    fontStyle: FontStyle.italic,
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
 
-          const SizedBox(height: 14),
-
-          // ── DAQI band row (1–10 numeric scale, UK DAQI) ──────────────────
-          _DaqiBandBar(currentBand: daqiInfo.band),
+          const SizedBox(height: 24),
         ],
       ),
     );
   }
 }
 
-/// Visual DAQI 1–10 band bar with the current band highlighted.
-/// UK DAQI uses a 10-point scale: 1–3 Low, 4–6 Moderate, 7–9 High, 10 Very High.
-class _DaqiBandBar extends StatelessWidget {
-  final DaqiBand currentBand;
-
-  const _DaqiBandBar({required this.currentBand});
-
-  static const _bands = [
-    (label: 'Low',       colour: AppColours.daqiLow,      count: 3),
-    (label: 'Moderate',  colour: AppColours.daqiModerate,  count: 3),
-    (label: 'High',      colour: AppColours.daqiHigh,      count: 3),
-    (label: 'Very High', colour: AppColours.daqiVeryHigh,  count: 1),
-  ];
-
-  DaqiBand _bandForIndex(int index) {
-    if (index < 3)      return DaqiBand.low;
-    if (index < 6)      return DaqiBand.moderate;
-    if (index < 9)      return DaqiBand.high;
-    return                     DaqiBand.veryHigh;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        // Segment bar
-        Row(
-          children: List.generate(10, (i) {
-            final segmentBand = _bandForIndex(i);
-            final isActive = segmentBand == currentBand;
-            final colour = switch (segmentBand) {
-              DaqiBand.low      => AppColours.daqiLow,
-              DaqiBand.moderate => AppColours.daqiModerate,
-              DaqiBand.high     => AppColours.daqiHigh,
-              DaqiBand.veryHigh => AppColours.daqiVeryHigh,
-            };
-
-            return Expanded(
-              child: Container(
-                margin: EdgeInsets.only(right: i < 9 ? 2 : 0),
-                height: 6,
-                decoration: BoxDecoration(
-                  color: isActive ? colour : colour.withValues(alpha: 0.25),
-                  borderRadius: BorderRadius.horizontal(
-                    left:  i == 0 ? const Radius.circular(3) : Radius.zero,
-                    right: i == 9 ? const Radius.circular(3) : Radius.zero,
-                  ),
-                ),
-              ),
-            );
-          }),
-        ),
-
-        const SizedBox(height: 6),
-
-        // Band labels below segments
-        Row(
-          children: _bands.map((b) {
-            return Expanded(
-              flex: b.count,
-              child: Text(
-                b.label,
-                style: TextStyle(
-                  fontSize: 9,
-                  color: b.colour.withValues(alpha: 0.7),
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            );
-          }).toList(),
-        ),
-      ],
-    );
-  }
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
-// Metric cards grid
+// Metric cards grid (device-sourced)
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _MetricGrid extends StatelessWidget {
   final AirQualityReading reading;
   final void Function({
-    required String label,
+    required String infoSheetLabel,
     required String unit,
-    required String? value,
+    required double? numericValue,
     required DaqiInfo? daqiInfo,
+    required BandScaleSpec? scaleSpec,
+    required MetricExtractor extractor,
   }) onInfoTap;
 
   const _MetricGrid({required this.reading, required this.onInfoTap});
@@ -335,10 +284,12 @@ class _MetricGrid extends StatelessWidget {
           value:    m.value,
           daqiInfo: m.daqiInfo,
           onInfoTap: () => onInfoTap(
-            label:    m.label,
-            unit:     m.unit,
-            value:    m.value,
-            daqiInfo: m.daqiInfo,
+            infoSheetLabel: m.infoSheetLabel,
+            unit:           m.unit,
+            numericValue:   m.numericValue,
+            daqiInfo:       m.daqiInfo,
+            scaleSpec:      m.scaleSpec,
+            extractor:      m.extractor,
           ),
         );
       },
@@ -348,131 +299,315 @@ class _MetricGrid extends StatelessWidget {
   List<_MetricSpec> _buildMetrics(AirQualityReading r) {
     return [
       _MetricSpec(
-        label:    'PM2.5',
-        unit:     'µg/m³',
-        value:    r.pm25.toStringAsFixed(1),
-        daqiInfo: DaqiUtils.forPm25(r.pm25),
+        label:        'PM2.5',
+        unit:         'µg/m³',
+        value:        r.pm25.toStringAsFixed(1),
+        numericValue: r.pm25,
+        daqiInfo:     DaqiUtils.forPm25(r.pm25),
+        scaleSpec:    MetricScales.pm25,
+        extractor:    (rr) => (numericValue: rr.pm25, daqiInfo: DaqiUtils.forPm25(rr.pm25)),
       ),
       _MetricSpec(
-        label:    'PM10',
-        unit:     'µg/m³',
-        value:    r.pm10.toStringAsFixed(1),
-        daqiInfo: DaqiUtils.forPm10(r.pm10),
+        label:        'PM10',
+        unit:         'µg/m³',
+        value:        r.pm10.toStringAsFixed(1),
+        numericValue: r.pm10,
+        daqiInfo:     DaqiUtils.forPm10(r.pm10),
+        scaleSpec:    MetricScales.pm10,
+        extractor:    (rr) => (numericValue: rr.pm10, daqiInfo: DaqiUtils.forPm10(rr.pm10)),
       ),
       _MetricSpec(
-        label:    'PM1',
-        unit:     'µg/m³',
-        value:    r.pm1.toStringAsFixed(1),
-        daqiInfo: DaqiUtils.forPm1(r.pm1),
+        label:        'PM1',
+        unit:         'µg/m³',
+        value:        r.pm1.toStringAsFixed(1),
+        numericValue: r.pm1,
+        daqiInfo:     DaqiUtils.forPm1(r.pm1),
+        scaleSpec:    MetricScales.pm1,
+        extractor:    (rr) => (numericValue: rr.pm1, daqiInfo: DaqiUtils.forPm1(rr.pm1)),
       ),
       _MetricSpec(
-        label:    'CO₂',
-        unit:     'ppm',
-        value:    r.co2.toStringAsFixed(0),
-        daqiInfo: DaqiUtils.forCo2(r.co2),
+        label:        'CO₂',
+        unit:         'ppm',
+        value:        r.co2.toStringAsFixed(0),
+        numericValue: r.co2,
+        daqiInfo:     DaqiUtils.forCo2(r.co2),
+        scaleSpec:    MetricScales.co2,
+        extractor:    (rr) => (numericValue: rr.co2, daqiInfo: DaqiUtils.forCo2(rr.co2)),
       ),
       _MetricSpec(
-        label:    'Temperature',
-        unit:     '°C',
-        value:    r.temperature.toStringAsFixed(1),
-        daqiInfo: DaqiUtils.forTemperature(r.temperature),
+        label:        'Temperature',
+        unit:         '°C',
+        value:        r.temperature.toStringAsFixed(1),
+        numericValue: r.temperature,
+        daqiInfo:     DaqiUtils.forTemperature(r.temperature),
+        scaleSpec:    MetricScales.temperature,
+        extractor:    (rr) => (numericValue: rr.temperature, daqiInfo: DaqiUtils.forTemperature(rr.temperature)),
       ),
       _MetricSpec(
-        label:    'Humidity',
-        unit:     '%',
-        value:    r.humidity.toStringAsFixed(1),
-        daqiInfo: DaqiUtils.forHumidity(r.humidity),
+        label:        'Humidity',
+        unit:         '%',
+        value:        r.humidity.toStringAsFixed(1),
+        numericValue: r.humidity,
+        daqiInfo:     DaqiUtils.forHumidity(r.humidity),
+        scaleSpec:    MetricScales.humidity,
+        extractor:    (rr) => (numericValue: rr.humidity, daqiInfo: DaqiUtils.forHumidity(rr.humidity)),
       ),
       _MetricSpec(
-        label:    'Pressure',
-        unit:     'hPa',
-        value:    r.pressure.toStringAsFixed(1),
-        daqiInfo: DaqiUtils.forPressure(r.pressure),
+        label:        'Air Pressure',
+        unit:         'hPa',
+        value:        r.pressure.toStringAsFixed(1),
+        numericValue: r.pressure,
+        daqiInfo:     DaqiUtils.forPressure(r.pressure),
+        scaleSpec:    MetricScales.pressure,
+        extractor:    (rr) => (numericValue: rr.pressure, daqiInfo: DaqiUtils.forPressure(rr.pressure)),
+      ),
+      // Card title kept short for the grid; the info sheet uses the full name.
+      _MetricSpec(
+        label:          'Pressure Change',
+        infoSheetLabel: 'Absolute Air Pressure Change',
+        unit:           'Pa/s',
+        value:          r.pressureChangePaPerSec != null
+            ? r.pressureChangePaPerSec!.toStringAsFixed(1)
+            : '—',
+        numericValue:   r.pressureChangePaPerSec,
+        daqiInfo:       r.pressureChangePaPerSec != null
+            ? DaqiUtils.forPressureGradient(r.pressureChangePaPerSec!)
+            : null,
+        scaleSpec:      MetricScales.pressureChange,
+        extractor: (rr) => (
+          numericValue: rr.pressureChangePaPerSec,
+          daqiInfo: rr.pressureChangePaPerSec != null
+              ? DaqiUtils.forPressureGradient(rr.pressureChangePaPerSec!)
+              : null,
+        ),
+      ),
+      // VOC Index and NOx Index are dimensionless (Sensirion SGP41 scaled 1–500),
+      // so unit is empty. Values are null until SGP41 is integrated.
+      _MetricSpec(
+        label:        'VOC Index',
+        unit:         '',
+        value:        r.tvoc != null ? r.tvoc!.toStringAsFixed(0) : '—',
+        numericValue: r.tvoc,
+        daqiInfo:     DaqiUtils.forTvoc(r.tvoc),
+        scaleSpec:    MetricScales.vocIndex,
+        extractor:    (rr) => (numericValue: rr.tvoc, daqiInfo: DaqiUtils.forTvoc(rr.tvoc)),
       ),
       _MetricSpec(
-        label:    'NOx',
-        unit:     'ppb',
-        value:    r.nox != null ? r.nox!.toStringAsFixed(1) : '—',
-        daqiInfo: DaqiUtils.forNox(r.nox),
-      ),
-      _MetricSpec(
-        label:    'TVOC',
-        unit:     'ppb',
-        value:    r.tvoc != null ? r.tvoc!.toStringAsFixed(1) : '—',
-        daqiInfo: DaqiUtils.forTvoc(r.tvoc),
+        label:        'NOx Index',
+        unit:         '',
+        value:        r.nox != null ? r.nox!.toStringAsFixed(0) : '—',
+        numericValue: r.nox,
+        daqiInfo:     DaqiUtils.forNox(r.nox),
+        scaleSpec:    MetricScales.noxIndex,
+        extractor:    (rr) => (numericValue: rr.nox, daqiInfo: DaqiUtils.forNox(rr.nox)),
       ),
     ];
   }
 }
 
 class _MetricSpec {
-  final String label;
+  final String label;          // shown on the metric card
+  final String infoSheetLabel; // shown on the bottom sheet (defaults to label)
   final String unit;
   final String? value;
+  final double? numericValue;
   final DaqiInfo? daqiInfo;
+  final BandScaleSpec? scaleSpec;
+  final MetricExtractor extractor;
 
   const _MetricSpec({
     required this.label,
+    String? infoSheetLabel,
     required this.unit,
     required this.value,
+    required this.numericValue,
     required this.daqiInfo,
-  });
+    required this.scaleSpec,
+    required this.extractor,
+  }) : infoSheetLabel = infoSheetLabel ?? label;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Weather + outdoor AQI card (placeholder)
+// UK DAQI card (from API — placeholder until wired up)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Visually distinct from device metric cards:
+//   - full-width horizontal layout
+//   - subtle accent-tinted background
+//   - leading icon to signal "external data"
+
+class _UkDaqiCard extends StatelessWidget {
+  final VoidCallback onInfoTap;
+  const _UkDaqiCard({required this.onInfoTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return _ApiCardShell(
+      icon:       Icons.public_outlined,
+      iconColour: AppColours.accentSecondary,
+      title:      'UK DAQI',
+      subtitle:   'Outdoor air quality (DEFRA)',
+      // TODO: Wire up DEFRA / outdoor AQI API. When connected, replace this
+      //       placeholder with the live DAQI band returned from the API.
+      trailing:   const _PlaceholderBandPill(),
+      onInfoTap:  onInfoTap,
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Local Weather card (from API — placeholder until wired up)
 // ─────────────────────────────────────────────────────────────────────────────
 
-class _WeatherCard extends StatelessWidget {
-  const _WeatherCard();
+class _LocalWeatherCard extends StatelessWidget {
+  final VoidCallback onInfoTap;
+  const _LocalWeatherCard({required this.onInfoTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return _ApiCardShell(
+      icon:       Icons.wb_cloudy_outlined,
+      iconColour: AppColours.accentSecondary,
+      title:      'Local Weather',
+      subtitle:   'Temperature, conditions',
+      // TODO: Wire up weather API (OpenWeather, Met Office, etc.).
+      //       No band pill — weather has no DAQI band.
+      trailing:   const Text(
+        '—',
+        style: TextStyle(
+          fontSize: 20,
+          fontWeight: FontWeight.w400,
+          color: AppColours.textSecondary,
+        ),
+      ),
+      onInfoTap:  onInfoTap,
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared shell for API-driven cards — full-width, horizontal, accent tint
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _ApiCardShell extends StatelessWidget {
+  final IconData icon;
+  final Color iconColour;
+  final String title;
+  final String subtitle;
+  final Widget trailing;
+  final VoidCallback onInfoTap;
+
+  const _ApiCardShell({
+    required this.icon,
+    required this.iconColour,
+    required this.title,
+    required this.subtitle,
+    required this.trailing,
+    required this.onInfoTap,
+  });
 
   @override
   Widget build(BuildContext context) {
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(20),
+      padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: AppColours.surface,
-        borderRadius: BorderRadius.circular(20),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.07),
-            blurRadius: 12,
-            offset: const Offset(0, 3),
-          ),
-        ],
+        // Subtle tint to differentiate from device metric cards
+        color: AppColours.accentSecondary.withValues(alpha: 0.06),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: AppColours.accentSecondary.withValues(alpha: 0.18),
+          width: 1,
+        ),
       ),
       child: Row(
         children: [
-          Icon(
-            Icons.wb_sunny_outlined,
-            color: AppColours.daqiModerate,
-            size: 32,
+          // ── Leading icon in a soft circle ────────────────────────────────
+          Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              color: iconColour.withValues(alpha: 0.15),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(icon, size: 20, color: iconColour),
           ),
-          const SizedBox(width: 16),
+
+          const SizedBox(width: 14),
+
+          // ── Title + subtitle ──────────────────────────────────────────────
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
               children: [
-                const Text(
-                  'Local Weather & Outdoor AQI',
-                  style: TextStyle(
-                    fontSize: 13,
+                Text(
+                  title,
+                  style: const TextStyle(
+                    fontSize: 14,
                     fontWeight: FontWeight.w600,
                     color: AppColours.textPrimary,
                   ),
                 ),
-                const SizedBox(height: 4),
+                const SizedBox(height: 2),
                 Text(
-                  // TODO: Wire up weather/outdoor AQI API (OpenWeather, IQAir, or DEFRA)
-                  'Weather data coming soon',
+                  subtitle,
                   style: const TextStyle(
-                    fontSize: 12,
+                    fontSize: 11,
                     color: AppColours.textSecondary,
-                    fontStyle: FontStyle.italic,
                   ),
                 ),
               ],
+            ),
+          ),
+
+          // ── Trailing value / band pill ────────────────────────────────────
+          trailing,
+
+          const SizedBox(width: 6),
+
+          // ── (i) info icon ─────────────────────────────────────────────────
+          GestureDetector(
+            onTap: onInfoTap,
+            behavior: HitTestBehavior.opaque,
+            child: const Padding(
+              padding: EdgeInsets.all(4),
+              child: Icon(
+                Icons.info_outline,
+                size: 18,
+                color: AppColours.textSecondary,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Placeholder pill shown on the UK DAQI card before the API is wired up.
+/// Once the API returns a value, replace with a real [_BandPill] coloured
+/// by [DaqiUtils.forUkDaqiIndex].
+class _PlaceholderBandPill extends StatelessWidget {
+  const _PlaceholderBandPill();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      decoration: BoxDecoration(
+        color: AppColours.textSecondary.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: const Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            '—',
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              color: AppColours.textSecondary,
             ),
           ),
         ],

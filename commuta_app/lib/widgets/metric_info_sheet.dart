@@ -1,24 +1,48 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../core/constants/app_colours.dart';
 import '../core/utils/daqi_utils.dart';
+import '../data/datasources/air_quality_datasource.dart';
+import '../data/models/air_quality_reading.dart';
+import 'band_scale.dart';
+
+/// A snapshot of a single metric's live state — the bits that change as
+/// new readings come in. Returned by [MetricExtractor].
+typedef MetricLiveState = ({double? numericValue, DaqiInfo? daqiInfo});
+
+/// Pulls a metric's numeric value + DAQI band out of a full reading.
+/// Each metric card supplies its own when opening the info sheet so the
+/// sheet can update in real time without knowing about every field on
+/// [AirQualityReading].
+typedef MetricExtractor = MetricLiveState Function(AirQualityReading reading);
 
 /// Bottom sheet shown when the user taps the (i) icon on a metric card.
 ///
-/// Currently a stub — sections are clearly marked TODO so they can be
-/// filled in once pollutant explanations and health recommendations are
-/// researched.
-class MetricInfoSheet extends StatelessWidget {
+/// When [dataSource] and [extractor] are provided, the sheet subscribes
+/// to live readings and updates its displayed value, band, and scale
+/// marker as new data arrives. For API-driven cards that have no live
+/// device data (UK DAQI, Local Weather), leave both `null` — the sheet
+/// will show the placeholders unchanged.
+class MetricInfoSheet extends StatefulWidget {
   final String metricLabel;
   final String unit;
-  final String? currentValue;
-  final DaqiInfo? daqiInfo;
+  final double? initialNumericValue;
+  final DaqiInfo? initialDaqiInfo;
+  final BandScaleSpec? scaleSpec;
+
+  // Live update wiring (optional)
+  final AirQualityDataSource? dataSource;
+  final MetricExtractor? extractor;
 
   const MetricInfoSheet({
     super.key,
     required this.metricLabel,
     required this.unit,
-    this.currentValue,
-    this.daqiInfo,
+    this.initialNumericValue,
+    this.initialDaqiInfo,
+    this.scaleSpec,
+    this.dataSource,
+    this.extractor,
   });
 
   /// Convenience method to show this sheet from any widget.
@@ -26,20 +50,75 @@ class MetricInfoSheet extends StatelessWidget {
     BuildContext context, {
     required String metricLabel,
     required String unit,
-    String? currentValue,
-    DaqiInfo? daqiInfo,
+    double? initialNumericValue,
+    DaqiInfo? initialDaqiInfo,
+    BandScaleSpec? scaleSpec,
+    AirQualityDataSource? dataSource,
+    MetricExtractor? extractor,
   }) {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (_) => MetricInfoSheet(
-        metricLabel:  metricLabel,
-        unit:         unit,
-        currentValue: currentValue,
-        daqiInfo:     daqiInfo,
+        metricLabel:         metricLabel,
+        unit:                unit,
+        initialNumericValue: initialNumericValue,
+        initialDaqiInfo:     initialDaqiInfo,
+        scaleSpec:           scaleSpec,
+        dataSource:          dataSource,
+        extractor:           extractor,
       ),
     );
+  }
+
+  @override
+  State<MetricInfoSheet> createState() => _MetricInfoSheetState();
+}
+
+class _MetricInfoSheetState extends State<MetricInfoSheet> {
+  double? _numericValue;
+  DaqiInfo? _daqiInfo;
+  StreamSubscription<AirQualityReading>? _sub;
+
+  @override
+  void initState() {
+    super.initState();
+    _numericValue = widget.initialNumericValue;
+    _daqiInfo     = widget.initialDaqiInfo;
+
+    // If we have a live wire-up, subscribe so the sheet updates as new
+    // readings arrive. The data source is owned by HomeScreen and outlives
+    // this sheet, so the subscription is safe.
+    if (widget.dataSource != null && widget.extractor != null) {
+      _sub = widget.dataSource!
+          .subscribeToLiveReadings()
+          .listen(_onNewReading);
+    }
+  }
+
+  void _onNewReading(AirQualityReading reading) {
+    if (!mounted) return;
+    final state = widget.extractor!(reading);
+    setState(() {
+      _numericValue = state.numericValue;
+      _daqiInfo     = state.daqiInfo;
+    });
+  }
+
+  @override
+  void dispose() {
+    _sub?.cancel();
+    super.dispose();
+  }
+
+  String _formatValue(double v) {
+    // Match the metric card's formatting: integer for large-magnitude metrics
+    // like CO₂/VOC/NOx; one decimal place otherwise.
+    if (widget.unit == 'ppm' || widget.scaleSpec?.unit == '' /* dimensionless */) {
+      return v.toStringAsFixed(0);
+    }
+    return v.toStringAsFixed(1);
   }
 
   @override
@@ -73,62 +152,34 @@ class MetricInfoSheet extends StatelessWidget {
               ),
 
               // ── Header: metric name + current value ──────────────────────
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Expanded(
-                    child: Text(
-                      metricLabel,
-                      style: const TextStyle(
-                        fontSize: 22,
-                        fontWeight: FontWeight.w700,
-                        color: AppColours.textPrimary,
-                      ),
-                    ),
-                  ),
-                  if (currentValue != null && currentValue != '—') ...[
-                    Text(
-                      currentValue!,
-                      style: TextStyle(
-                        fontSize: 28,
-                        fontWeight: FontWeight.w600,
-                        color: daqiInfo?.colour ?? AppColours.textPrimary,
-                      ),
-                    ),
-                    const SizedBox(width: 4),
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 4),
-                      child: Text(
-                        unit,
-                        style: const TextStyle(
-                          fontSize: 13,
-                          color: AppColours.textSecondary,
-                        ),
-                      ),
-                    ),
-                  ],
-                ],
-              ),
+              _buildHeader(),
 
               const SizedBox(height: 24),
 
               // ── What is this pollutant? ───────────────────────────────────
-              _SectionHeader(title: 'What is $metricLabel?'),
+              _SectionHeader(title: 'What is ${widget.metricLabel}?'),
               const SizedBox(height: 8),
               const _PlaceholderText(
-                // TODO: Fill in pollutant explanation (1–2 sentences)
+                // TODO: Fill in pollutant / metric explanation (1–2 sentences)
                 text: 'Pollutant explanation coming soon.',
               ),
 
               const SizedBox(height: 24),
 
-              // ── DAQI band scale ───────────────────────────────────────────
-              const _SectionHeader(title: 'Air quality scale'),
-              const SizedBox(height: 8),
-              const _PlaceholderText(
-                // TODO: Build the DAQI band scale visual with current reading marked
-                text: 'DAQI band scale coming soon.',
-              ),
+              // ── Scale ─────────────────────────────────────────────────────
+              const _SectionHeader(title: 'Scale'),
+              const SizedBox(height: 16),
+              if (widget.scaleSpec != null)
+                BandScale(
+                  spec:         widget.scaleSpec!,
+                  currentValue: _numericValue,
+                  currentBand:  _daqiInfo,
+                )
+              else
+                const _PlaceholderText(
+                  // TODO: Add a scale spec for this metric in daqi_utils.dart
+                  text: 'Scale coming soon.',
+                ),
 
               const SizedBox(height: 24),
 
@@ -136,33 +187,55 @@ class MetricInfoSheet extends StatelessWidget {
               const _SectionHeader(title: 'Health recommendation'),
               const SizedBox(height: 8),
               const _PlaceholderText(
-                // TODO: Fill in health recommendation for the current DAQI band
+                // TODO: Fill in health recommendation for the current band
                 text: 'Health recommendation coming soon.',
-              ),
-
-              const SizedBox(height: 24),
-
-              // ── Customise threshold button ────────────────────────────────
-              OutlinedButton.icon(
-                onPressed: () {
-                  // TODO: Navigate to threshold customisation in Profile → Alerts
-                  Navigator.pop(context);
-                },
-                icon: const Icon(Icons.tune_outlined, size: 18),
-                label: const Text('Customise threshold'),
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: AppColours.accent,
-                  side: BorderSide(color: AppColours.accent.withValues(alpha: 0.5)),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                ),
               ),
             ],
           ),
         );
       },
+    );
+  }
+
+  Widget _buildHeader() {
+    final hasValue = _numericValue != null;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        Expanded(
+          child: Text(
+            widget.metricLabel,
+            style: const TextStyle(
+              fontSize: 22,
+              fontWeight: FontWeight.w700,
+              color: AppColours.textPrimary,
+            ),
+          ),
+        ),
+        if (hasValue) ...[
+          Text(
+            _formatValue(_numericValue!),
+            style: TextStyle(
+              fontSize: 28,
+              fontWeight: FontWeight.w600,
+              color: _daqiInfo?.colour ?? AppColours.textPrimary,
+            ),
+          ),
+          if (widget.unit.isNotEmpty) ...[
+            const SizedBox(width: 4),
+            Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Text(
+                widget.unit,
+                style: const TextStyle(
+                  fontSize: 13,
+                  color: AppColours.textSecondary,
+                ),
+              ),
+            ),
+          ],
+        ],
+      ],
     );
   }
 }

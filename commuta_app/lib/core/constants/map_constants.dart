@@ -23,4 +23,13 @@ class MapConstants {
   // ── Marker ──────────────────────────────────────────────────────────────
   /// Logical pixel size of the AQI marker bitmap.
   static const double markerLogicalSize = 56.0;
+
+  // ── Dwell detection ─────────────────────────────────────────────────────
+  /// Readings within this radius of the cluster anchor are treated
+  /// as the same stationary spot. Spec §4.3.
+  static const double dwellRadiusMetres = 30.0;
+
+  /// A cluster collapses into a collection marker once it has been
+  /// active for at least this many seconds. Spec §4.3.
+  static const int dwellDurationSeconds = 60;
 }

@@ -41,10 +41,7 @@ class AqiMarkerBuilder {
       ringRadius,
       Paint()
         ..color = Colors.black.withValues(alpha: 0.18)
-        ..maskFilter = MaskFilter.blur(
-          BlurStyle.normal,
-          4 * devicePixelRatio,
-        ),
+        ..maskFilter = MaskFilter.blur(BlurStyle.normal, 4 * devicePixelRatio),
     );
 
     // White outer ring
@@ -73,10 +70,7 @@ class AqiMarkerBuilder {
     tp.layout();
     tp.paint(
       canvas,
-      Offset(
-        (pixelSize - tp.width) / 2,
-        (pixelSize - tp.height) / 2,
-      ),
+      Offset((pixelSize - tp.width) / 2, (pixelSize - tp.height) / 2),
     );
 
     final image = await recorder.endRecording().toImage(
@@ -96,12 +90,78 @@ class AqiMarkerBuilder {
     return desc;
   }
 
+  /// Builds the collection-marker bitmap: three overlapping coloured
+  /// discs, no number in the centre, dominant colour = worst band
+  /// across the collection's readings. The cache key uses only the
+  /// band, so appending readings without a band change is free.
+  static Future<BitmapDescriptor> buildCollection({
+    required DaqiBand dominantBand,
+    double devicePixelRatio = 3.0,
+  }) async {
+    final key = 'collection_${dominantBand.name}';
+    if (_cache.containsKey(key)) return _cache[key]!;
+
+    final base = MapConstants.markerLogicalSize * devicePixelRatio;
+    // Slightly larger canvas so the stacked offsets aren't clipped.
+    final canvasSize = base * 1.25;
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+
+    final centre = Offset(canvasSize / 2, canvasSize / 2);
+    final discRadius = base * 0.38;
+    final ringWidth = base * 0.05;
+    final offset = base * 0.10;
+    final fill = _colourForBand(dominantBand);
+
+    // Three discs, drawn back-to-front along a top-left diagonal.
+    final centres = <Offset>[
+      centre + Offset(offset, offset), // bottom-right (back)
+      centre, // middle
+      centre + Offset(-offset, -offset), // top-left (front)
+    ];
+
+    for (final c in centres) {
+      // Soft drop shadow
+      canvas.drawCircle(
+        c + Offset(0, 2 * devicePixelRatio),
+        discRadius,
+        Paint()
+          ..color = Colors.black.withValues(alpha: 0.18)
+          ..maskFilter = MaskFilter.blur(
+            BlurStyle.normal,
+            4 * devicePixelRatio,
+          ),
+      );
+      // White outer ring
+      canvas.drawCircle(c, discRadius, Paint()..color = Colors.white);
+      // Coloured inner fill
+      canvas.drawCircle(c, discRadius - ringWidth, Paint()..color = fill);
+    }
+
+    final image = await recorder.endRecording().toImage(
+      canvasSize.toInt(),
+      canvasSize.toInt(),
+    );
+    final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+
+    final desc = BitmapDescriptor.bytes(
+      bytes!.buffer.asUint8List(),
+      imagePixelRatio: devicePixelRatio,
+    );
+    _cache[key] = desc;
+    return desc;
+  }
+
   static Color _colourForBand(DaqiBand band) {
     switch (band) {
-      case DaqiBand.low:      return AppColours.daqiLow;
-      case DaqiBand.moderate: return AppColours.daqiModerate;
-      case DaqiBand.high:     return AppColours.daqiHigh;
-      case DaqiBand.veryHigh: return AppColours.daqiVeryHigh;
+      case DaqiBand.low:
+        return AppColours.daqiLow;
+      case DaqiBand.moderate:
+        return AppColours.daqiModerate;
+      case DaqiBand.high:
+        return AppColours.daqiHigh;
+      case DaqiBand.veryHigh:
+        return AppColours.daqiVeryHigh;
     }
   }
 }

@@ -124,7 +124,7 @@ class _TflMapViewState extends State<TflMapView> {
         return InteractiveViewer(
           transformationController: _transformController,
           minScale: 0.6,
-          maxScale: 40.0,
+          maxScale: 200.0,
           boundaryMargin: EdgeInsets.zero,
           child: SizedBox(
             width: constraints.maxWidth,

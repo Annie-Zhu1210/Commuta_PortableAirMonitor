@@ -10,9 +10,21 @@ import '../data/models/tfl_station.dart';
 /// calls. Call [load] once at app startup (or lazily on first opening
 /// of the Map tab) — repeat calls are idempotent.
 ///
+/// Naptan StopPoints are deliberately kept separate here, not merged.
+/// Where TfL's data has multiple records for what looks like one
+/// station (e.g. "Paddington", "Paddington (H&C Line)-Underground",
+/// "London Paddington"), each is treated as its own station with its
+/// own ID, position, and line set. This matters for the dissertation:
+/// the Elizabeth Line platforms at Paddington are physically distinct
+/// from the District/Circle/Bakerloo/H&C platforms and have different
+/// air quality characteristics, so air quality readings collected
+/// there should be tagged to a specific platform group rather than
+/// pooled across the whole "station". The map will show separate
+/// dots in these cases — acceptable cost for clean per-platform data.
+///
 /// Singleton-style for now (no state-management library in use yet).
-/// If we ever introduce Provider / Riverpod, this is straightforward to
-/// expose as a provider without changing call sites.
+/// If we ever introduce Provider / Riverpod, this is straightforward
+/// to expose as a provider without changing call sites.
 class TflMapData {
   TflMapData._();
   static final TflMapData instance = TflMapData._();
@@ -38,8 +50,8 @@ class TflMapData {
   /// O(1) lookup by Naptan station id (e.g. '940GZZLUOXC').
   TflStation? stationById(String id) => _stationsById[id];
 
-  /// Loads the bundled JSON. Idempotent — calling more than once is a no-op
-  /// after the first successful call.
+  /// Loads the bundled JSON. Idempotent — calling more than once is
+  /// a no-op after the first successful call.
   Future<void> load() async {
     if (_loaded) return;
 
@@ -54,15 +66,16 @@ class TflMapData {
         (json.decode(stationsRaw) as List).cast<Map<String, dynamic>>();
 
     _lines = linesJson.map(TflLine.fromJson).toList(growable: false);
-    _stations = stationsJson.map(TflStation.fromJson).toList(growable: false);
+    _stations =
+        stationsJson.map(TflStation.fromJson).toList(growable: false);
     _linesById = {for (final l in _lines) l.id: l};
     _stationsById = {for (final s in _stations) s.id: s};
 
     _loaded = true;
   }
 
-  /// Test-only: resets internal state so a different fixture can be loaded.
-  /// Don't call this from app code.
+  /// Test-only: resets internal state so a different fixture can be
+  /// loaded. Don't call this from app code.
   void resetForTesting() {
     _loaded = false;
     _lines = const [];

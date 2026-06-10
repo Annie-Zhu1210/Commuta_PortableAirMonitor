@@ -37,4 +37,31 @@ class TflStation {
       isInterchange: json['isInterchange'] as bool,
     );
   }
+
+  /// Display-friendly name for use on the topological map, info-sheet
+  /// headers, etc. Strips the TfL Naptan suffixes ("Underground
+  /// Station", "Rail Station", "DLR Station", "Overground Station")
+  /// that are redundant in app contexts where the rail/Tube nature is
+  /// already obvious.
+  ///
+  /// E.g. "King's Cross St. Pancras Underground Station" → "King's
+  /// Cross St. Pancras". Disambiguating suffixes like "(Bakerloo)" or
+  /// "(Circle Line)" are left intact — they distinguish Edgware Road
+  /// from Edgware Road, Paddington from Paddington.
+  String get displayName {
+    // Longest suffixes first so "Underground Station" isn't accidentally
+    // shortened to "Station" by a partial match.
+    const suffixes = [
+      ' Underground Station',
+      ' Overground Station',
+      ' Rail Station',
+      ' DLR Station',
+    ];
+    for (final suffix in suffixes) {
+      if (name.endsWith(suffix)) {
+        return name.substring(0, name.length - suffix.length);
+      }
+    }
+    return name;
+  }
 }

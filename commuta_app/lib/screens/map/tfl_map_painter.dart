@@ -1,20 +1,26 @@
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import '../../core/constants/app_colours.dart';
 import '../../data/models/lat_lng.dart';
 import '../../data/models/tfl_line.dart';
 import '../../data/models/tfl_station.dart';
 
 /// Renders the TfL rail map as a [CustomPainter].
 ///
-/// Phase 4 — Step 3: lines only. Station dots and labels come in Step 4.
+/// Phase 4 — Step 4: lines, station dots (interchanges as white-filled
+/// rings with a dark outline; non-interchanges as small solid dots),
+/// and zoom-aware station labels with multi-anchor placement and
+/// greedy collision avoidance.
 ///
 /// Coordinates use a simple equirectangular projection — linear in lat,
-/// and linear in lng with a `cos(midLat)` correction so longitude degrees
-/// have the right on-screen length relative to latitude degrees.
+/// and linear in lng with a `cos(midLat)` correction so longitude
+/// degrees have the right on-screen length relative to latitude
+/// degrees.
 ///
 /// `viewScale` is the current scale factor from the surrounding
-/// [InteractiveViewer]; the painter divides its stroke width by it so
-/// lines stay a constant thickness on screen regardless of zoom.
+/// [InteractiveViewer]; the painter divides all on-screen dimensions
+/// (stroke width, dot radius, label gap) by it so the rendered sizes
+/// stay constant regardless of zoom.
 class TflMapPainter extends CustomPainter {
   TflMapPainter({
     required this.lines,
@@ -29,13 +35,41 @@ class TflMapPainter extends CustomPainter {
   final List<TflStation> stations;
   final double lineStrokeWidth;
   final double padding;
-
-  /// The current [InteractiveViewer] scale. Used to keep strokes a
-  /// constant on-screen thickness regardless of zoom.
   final double viewScale;
 
   final _LatLngBounds _bounds;
   final List<TflLine> _sortedLines;
+
+  // === Station dot sizing ===
+  static const double _singleDotRadius = 3.0;
+  static const double _interchangeRingRadius = 4.0;
+  static const double _interchangeRingStrokeWidth = 1.5;
+
+  // === Label styling ===
+  static const double _labelFontSize = 10.0;
+  static const FontWeight _labelFontWeight = FontWeight.w500;
+  static const double _labelGap = 4.0;
+
+  // === Zoom thresholds for label visibility ===
+  static const double _interchangeLabelMinScale = 2.0;
+  static const double _stationLabelMinScale = 6.0;
+
+  /// Order in which label anchor positions are attempted. The first
+  /// position whose rectangle doesn't collide with already-painted
+  /// labels wins; if none work the label is skipped this frame.
+  static const List<_LabelAnchor> _labelAnchorOrder = [
+    _LabelAnchor.right,
+    _LabelAnchor.above,
+    _LabelAnchor.below,
+    _LabelAnchor.left,
+  ];
+
+  /// Cache of laid-out [TextPainter] instances keyed by display name.
+  /// Static because the painter is rebuilt every frame by
+  /// `AnimatedBuilder`; an instance field would be thrown away each
+  /// rebuild. Each entry is laid out once at [_labelFontSize] and then
+  /// counter-scaled at paint time, so the cache never invalidates.
+  static final Map<String, TextPainter> _textPainterCache = {};
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -48,12 +82,10 @@ class TflMapPainter extends CustomPainter {
     );
 
     _drawLines(canvas, projector);
+    _drawStations(canvas, projector);
   }
 
   void _drawLines(Canvas canvas, _Projector projector) {
-    // Strokes are painted into a canvas that the [InteractiveViewer] then
-    // scales by `viewScale`, so divide here to keep on-screen width
-    // constant. Guard against zero / tiny values just in case.
     final effectiveStrokeWidth =
         lineStrokeWidth / (viewScale > 0.01 ? viewScale : 1.0);
 
@@ -68,7 +100,6 @@ class TflMapPainter extends CustomPainter {
 
       for (final polyline in line.polylines) {
         if (polyline.length < 2) continue;
-
         final path = Path();
         final first = projector.project(polyline.first);
         path.moveTo(first.dx, first.dy);
@@ -81,8 +112,124 @@ class TflMapPainter extends CustomPainter {
     }
   }
 
-  /// Sorts lines so non-Tube modes paint first and Tube paints on top.
-  /// Within a mode the original JSON order is preserved.
+  void _drawStations(Canvas canvas, _Projector projector) {
+    final effectiveScale = viewScale > 0.01 ? viewScale : 1.0;
+    final singleDotRadius = _singleDotRadius / effectiveScale;
+    final ringRadius = _interchangeRingRadius / effectiveScale;
+    final ringStrokeWidth =
+        _interchangeRingStrokeWidth / effectiveScale;
+    final gap = _labelGap / effectiveScale;
+
+    final dotPaint = Paint()
+      ..color = AppColours.textPrimary
+      ..style = PaintingStyle.fill
+      ..isAntiAlias = true;
+
+    final ringFillPaint = Paint()
+      ..color = AppColours.surface
+      ..style = PaintingStyle.fill
+      ..isAntiAlias = true;
+
+    final ringStrokePaint = Paint()
+      ..color = AppColours.textPrimary
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = ringStrokeWidth
+      ..isAntiAlias = true;
+
+    // Pass 1 — dots.
+    for (final station in stations) {
+      final pos = projector.project(station.position);
+      if (station.isInterchange) {
+        canvas.drawCircle(pos, ringRadius, ringFillPaint);
+        canvas.drawCircle(pos, ringRadius, ringStrokePaint);
+      } else {
+        canvas.drawCircle(pos, singleDotRadius, dotPaint);
+      }
+    }
+
+    if (effectiveScale <= _interchangeLabelMinScale) return;
+
+    // Pass 2 — labels with multi-anchor placement + collision avoidance.
+    final paintedRects = <Rect>[];
+
+    /// Try each anchor in [_labelAnchorOrder]; return the first
+    /// rectangle that doesn't overlap anything already painted, or
+    /// null if all of them collide.
+    Rect? tryPlace(TflStation s, double dotEdge, TextPainter tp) {
+      final pos = projector.project(s.position);
+      final w = tp.width / effectiveScale;
+      final h = tp.height / effectiveScale;
+      for (final anchor in _labelAnchorOrder) {
+        final rect = anchor.rectFor(pos, dotEdge, gap, w, h);
+        if (!_anyOverlaps(rect, paintedRects)) return rect;
+      }
+      return null;
+    }
+
+    // Interchanges first, biggest first.
+    final interchanges = stations.where((s) => s.isInterchange).toList()
+      ..sort((a, b) => b.lineIds.length.compareTo(a.lineIds.length));
+    for (final station in interchanges) {
+      final tp = _getTextPainter(station.displayName);
+      final rect = tryPlace(station, ringRadius, tp);
+      if (rect == null) continue;
+      _paintLabel(canvas, tp, rect.topLeft, effectiveScale);
+      paintedRects.add(rect);
+    }
+
+    // Single-line stations — only above the higher threshold.
+    if (effectiveScale > _stationLabelMinScale) {
+      for (final station in stations) {
+        if (station.isInterchange) continue;
+        final tp = _getTextPainter(station.displayName);
+        final rect = tryPlace(station, singleDotRadius, tp);
+        if (rect == null) continue;
+        _paintLabel(canvas, tp, rect.topLeft, effectiveScale);
+        paintedRects.add(rect);
+      }
+    }
+  }
+
+  /// Looks up (or lazily builds and caches) a [TextPainter] for the
+  /// given display name.
+  static TextPainter _getTextPainter(String displayName) {
+    final cached = _textPainterCache[displayName];
+    if (cached != null) return cached;
+    final tp = TextPainter(
+      text: TextSpan(
+        text: displayName,
+        style: const TextStyle(
+          fontSize: _labelFontSize,
+          fontWeight: _labelFontWeight,
+          color: AppColours.textPrimary,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    _textPainterCache[displayName] = tp;
+    return tp;
+  }
+
+  static bool _anyOverlaps(Rect candidate, List<Rect> existing) {
+    for (final other in existing) {
+      if (candidate.overlaps(other)) return true;
+    }
+    return false;
+  }
+
+  static void _paintLabel(
+    Canvas canvas,
+    TextPainter tp,
+    Offset topLeft,
+    double effectiveScale,
+  ) {
+    canvas.save();
+    canvas.translate(topLeft.dx, topLeft.dy);
+    canvas.scale(1.0 / effectiveScale);
+    tp.paint(canvas, Offset.zero);
+    canvas.restore();
+  }
+
   static List<TflLine> _sortLinesForRendering(List<TflLine> lines) {
     int rank(TflLine l) {
       switch (l.mode) {
@@ -99,7 +246,6 @@ class TflMapPainter extends CustomPainter {
       }
     }
 
-    // Stable-ish sort: indexed pairs keep original order on ties.
     final indexed = [
       for (var i = 0; i < lines.length; i++) (i, lines[i]),
     ];
@@ -186,5 +332,53 @@ class _Projector {
     // Flip y — latitude increases northward, canvas y increases downward.
     final y = (_bounds.maxLat - point.latitude) * _scale + _offsetY;
     return Offset(x, y);
+  }
+}
+
+/// Where a label sits relative to its station dot. Tried in the order
+/// declared in [TflMapPainter._labelAnchorOrder].
+enum _LabelAnchor {
+  right,
+  above,
+  below,
+  left;
+
+  Rect rectFor(
+    Offset dotCentre,
+    double dotEdge,
+    double gap,
+    double width,
+    double height,
+  ) {
+    switch (this) {
+      case _LabelAnchor.right:
+        return Rect.fromLTWH(
+          dotCentre.dx + dotEdge + gap,
+          dotCentre.dy - height / 2,
+          width,
+          height,
+        );
+      case _LabelAnchor.above:
+        return Rect.fromLTWH(
+          dotCentre.dx - width / 2,
+          dotCentre.dy - dotEdge - gap - height,
+          width,
+          height,
+        );
+      case _LabelAnchor.below:
+        return Rect.fromLTWH(
+          dotCentre.dx - width / 2,
+          dotCentre.dy + dotEdge + gap,
+          width,
+          height,
+        );
+      case _LabelAnchor.left:
+        return Rect.fromLTWH(
+          dotCentre.dx - dotEdge - gap - width,
+          dotCentre.dy - height / 2,
+          width,
+          height,
+        );
+    }
   }
 }

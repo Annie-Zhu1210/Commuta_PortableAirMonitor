@@ -3412,20 +3412,6 @@
     "isInterchange": true
   },
   {
-    "id": "910GPADTON",
-    "name": "London Paddington Rail Station",
-    "lat": 51.515996,
-    "lng": -0.176174,
-    "lineIds": [
-      "elizabeth"
-    ],
-    "modes": [
-      "elizabeth-line",
-      "national-rail"
-    ],
-    "isInterchange": false
-  },
-  {
     "id": "940GZZLULGN",
     "name": "Loughton Underground Station",
     "lat": 51.641443,
@@ -3970,7 +3956,8 @@
       "elizabeth"
     ],
     "modes": [
-      "elizabeth-line"
+      "elizabeth-line",
+      "national-rail"
     ],
     "isInterchange": false
   },

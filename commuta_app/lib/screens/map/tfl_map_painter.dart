@@ -7,10 +7,11 @@ import '../../data/models/tfl_station.dart';
 
 /// Renders the TfL rail map as a [CustomPainter].
 ///
-/// Phase 4 — Step 4: lines, station dots (interchanges as white-filled
-/// rings with a dark outline; non-interchanges as small solid dots),
-/// and zoom-aware station labels with multi-anchor placement and
-/// greedy collision avoidance.
+/// Phase 4 — Step 5: lines, a sage halo around the currently classified
+/// station (when one is set), station dots (interchanges as
+/// white-filled rings with a dark outline; non-interchanges as small
+/// solid dots), and zoom-aware station labels with multi-anchor
+/// placement and greedy collision avoidance.
 ///
 /// Coordinates use a simple equirectangular projection — linear in lat,
 /// and linear in lng with a `cos(midLat)` correction so longitude
@@ -19,8 +20,8 @@ import '../../data/models/tfl_station.dart';
 ///
 /// `viewScale` is the current scale factor from the surrounding
 /// [InteractiveViewer]; the painter divides all on-screen dimensions
-/// (stroke width, dot radius, label gap) by it so the rendered sizes
-/// stay constant regardless of zoom.
+/// (stroke width, dot radius, halo radius, label gap) by it so the
+/// rendered sizes stay constant regardless of zoom.
 class TflMapPainter extends CustomPainter {
   TflMapPainter({
     required this.lines,
@@ -28,14 +29,24 @@ class TflMapPainter extends CustomPainter {
     this.lineStrokeWidth = 2.5,
     this.padding = 24.0,
     this.viewScale = 1.0,
-  })  : _bounds = _computeBounds(stations),
-        _sortedLines = _sortLinesForRendering(lines);
+    this.classifiedStation,
+  }) : _bounds = _computeBounds(stations),
+       _sortedLines = _sortLinesForRendering(lines);
 
   final List<TflLine> lines;
   final List<TflStation> stations;
   final double lineStrokeWidth;
   final double padding;
   final double viewScale;
+
+  /// The station the user is currently classified to, or null if no
+  /// station is detected. When non-null, a sage halo is painted
+  /// behind that station's dot.
+  ///
+  /// Resolved from a `ValueNotifier<String?>` in [TflMapView] before
+  /// being passed in — the painter stays decoupled from
+  /// `TflMapData`.
+  final TflStation? classifiedStation;
 
   final _LatLngBounds _bounds;
   final List<TflLine> _sortedLines;
@@ -44,6 +55,10 @@ class TflMapPainter extends CustomPainter {
   static const double _singleDotRadius = 3.0;
   static const double _interchangeRingRadius = 4.0;
   static const double _interchangeRingStrokeWidth = 1.5;
+
+  // === Halo around currently classified station ===
+  static const double _haloRadius = 35.0;
+  static const double _haloOpacity = 0.5;
 
   // === Label styling ===
   static const double _labelFontSize = 10.0;
@@ -75,13 +90,10 @@ class TflMapPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     if (stations.isEmpty || _sortedLines.isEmpty) return;
 
-    final projector = _Projector(
-      bounds: _bounds,
-      size: size,
-      padding: padding,
-    );
+    final projector = _Projector(bounds: _bounds, size: size, padding: padding);
 
     _drawLines(canvas, projector);
+    _drawHalo(canvas, projector);
     _drawStations(canvas, projector);
   }
 
@@ -112,12 +124,34 @@ class TflMapPainter extends CustomPainter {
     }
   }
 
+  /// Paints a single sage circle behind the classified station's dot.
+  /// No-op when [classifiedStation] is null. Constant size on screen
+  /// (radius divided by [viewScale], matching the rest of the painter).
+  void _drawHalo(Canvas canvas, _Projector projector) {
+    final station = classifiedStation;
+    if (station == null) return;
+
+    final effectiveScale = viewScale > 0.01 ? viewScale : 1.0;
+    final radius = _haloRadius / effectiveScale;
+    final centre = projector.project(station.position);
+
+    final paint = Paint()
+      ..shader = RadialGradient(
+        colors: [
+          const Color.fromARGB(166, 85, 151, 109).withValues(alpha: _haloOpacity),
+          AppColours.accent.withValues(alpha: 0.15),
+        ],
+      ).createShader(Rect.fromCircle(center: centre, radius: radius))
+      ..isAntiAlias = true;
+
+    canvas.drawCircle(centre, radius, paint);
+  }
+
   void _drawStations(Canvas canvas, _Projector projector) {
     final effectiveScale = viewScale > 0.01 ? viewScale : 1.0;
     final singleDotRadius = _singleDotRadius / effectiveScale;
     final ringRadius = _interchangeRingRadius / effectiveScale;
-    final ringStrokeWidth =
-        _interchangeRingStrokeWidth / effectiveScale;
+    final ringStrokeWidth = _interchangeRingStrokeWidth / effectiveScale;
     final gap = _labelGap / effectiveScale;
 
     final dotPaint = Paint()
@@ -246,9 +280,7 @@ class TflMapPainter extends CustomPainter {
       }
     }
 
-    final indexed = [
-      for (var i = 0; i < lines.length; i++) (i, lines[i]),
-    ];
+    final indexed = [for (var i = 0; i < lines.length; i++) (i, lines[i])];
     indexed.sort((a, b) {
       final byRank = rank(a.$2).compareTo(rank(b.$2));
       return byRank != 0 ? byRank : a.$1.compareTo(b.$1);
@@ -281,7 +313,8 @@ class TflMapPainter extends CustomPainter {
         oldDelegate.stations != stations ||
         oldDelegate.lineStrokeWidth != lineStrokeWidth ||
         oldDelegate.padding != padding ||
-        oldDelegate.viewScale != viewScale;
+        oldDelegate.viewScale != viewScale ||
+        oldDelegate.classifiedStation != classifiedStation;
   }
 }
 
@@ -298,17 +331,19 @@ class _Projector {
     required _LatLngBounds bounds,
     required Size size,
     required double padding,
-  })  : _bounds = bounds,
-        _lngScale =
-            math.cos(((bounds.minLat + bounds.maxLat) / 2) * math.pi / 180) {
+  }) : _bounds = bounds,
+       _lngScale = math.cos(
+         ((bounds.minLat + bounds.maxLat) / 2) * math.pi / 180,
+       ) {
     final projectedWidth = (bounds.maxLng - bounds.minLng) * _lngScale;
     final projectedHeight = bounds.maxLat - bounds.minLat;
 
     final availableWidth = size.width - 2 * padding;
     final availableHeight = size.height - 2 * padding;
 
-    final scaleX =
-        projectedWidth > 0 ? availableWidth / projectedWidth : double.infinity;
+    final scaleX = projectedWidth > 0
+        ? availableWidth / projectedWidth
+        : double.infinity;
     final scaleY = projectedHeight > 0
         ? availableHeight / projectedHeight
         : double.infinity;

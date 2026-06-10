@@ -3,8 +3,10 @@ import '../../widgets/map_view_toggle.dart';
 import 'google_map_view.dart';
 import 'tfl_map_view.dart';
 
-/// The Map tab — hosts the Google Map view, the TfL map view (placeholder
-/// until Phase 4), and the toggle that switches between them.
+/// The Map tab — hosts the Google Map view, the TfL Underground map
+/// view, and the toggle that switches between them. Both views stay
+/// mounted in an [IndexedStack] so their state (camera, markers,
+/// pan/zoom, classified station) survives switching between tabs.
 class MapScreen extends StatefulWidget {
   const MapScreen({super.key});
 

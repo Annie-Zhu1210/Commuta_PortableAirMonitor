@@ -25,11 +25,7 @@ class ReadingFloatingWindow extends StatefulWidget {
   /// "N readings". The TfL map will pass a station name here in Phase 5.
   final String? title;
 
-  const ReadingFloatingWindow({
-    super.key,
-    required this.readings,
-    this.title,
-  });
+  const ReadingFloatingWindow({super.key, required this.readings, this.title});
 
   @override
   State<ReadingFloatingWindow> createState() => _ReadingFloatingWindowState();
@@ -48,8 +44,7 @@ class _ReadingFloatingWindowState extends State<ReadingFloatingWindow> {
   /// Single-reading mode is always in detail.
   bool get _showingDetail => !_isCollection || _selectedReading != null;
 
-  AirQualityReading get _detailReading =>
-      _selectedReading ?? _readings.first;
+  AirQualityReading get _detailReading => _selectedReading ?? _readings.first;
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -90,10 +85,7 @@ class _ReadingFloatingWindowState extends State<ReadingFloatingWindow> {
       },
       child: Dialog(
         backgroundColor: Colors.transparent,
-        insetPadding: const EdgeInsets.symmetric(
-          horizontal: 32,
-          vertical: 64,
-        ),
+        insetPadding: const EdgeInsets.symmetric(horizontal: 32, vertical: 64),
         child: Container(
           constraints: const BoxConstraints(maxWidth: 360, maxHeight: 540),
           decoration: BoxDecoration(
@@ -146,8 +138,7 @@ class _ReadingFloatingWindowState extends State<ReadingFloatingWindow> {
                       size: 20,
                       color: AppColours.textPrimary,
                     ),
-                    onPressed: () =>
-                        setState(() => _selectedReading = null),
+                    onPressed: () => setState(() => _selectedReading = null),
                     tooltip: 'Back to list',
                   )
                 : null,
@@ -188,28 +179,23 @@ class _ReadingFloatingWindowState extends State<ReadingFloatingWindow> {
     final rows = <_MetricRow>[
       _MetricRow(
         'PM1',
-        _fmtInt(r.pm1),
+        _fmt1dp(r.pm1),
         'µg/m³',
         DaqiUtils.forPm1(r.pm1).colour,
       ),
       _MetricRow(
         'PM2.5',
-        _fmtInt(r.pm25),
+        _fmt1dp(r.pm25),
         'µg/m³',
         DaqiUtils.forPm25(r.pm25).colour,
       ),
       _MetricRow(
         'PM10',
-        _fmtInt(r.pm10),
+        _fmt1dp(r.pm10),
         'µg/m³',
         DaqiUtils.forPm10(r.pm10).colour,
       ),
-      _MetricRow(
-        'CO₂',
-        _fmtInt(r.co2),
-        'ppm',
-        DaqiUtils.forCo2(r.co2).colour,
-      ),
+      _MetricRow('CO₂', _fmtInt(r.co2), 'ppm', DaqiUtils.forCo2(r.co2).colour),
       _MetricRow(
         'Temperature',
         _fmt1dp(r.temperature),
@@ -218,36 +204,39 @@ class _ReadingFloatingWindowState extends State<ReadingFloatingWindow> {
       ),
       _MetricRow(
         'Humidity',
-        _fmtInt(r.humidity),
+        _fmt1dp(r.humidity),
         '%',
         DaqiUtils.forHumidity(r.humidity).colour,
       ),
       _MetricRow(
         'Pressure',
-        _fmtInt(r.pressure),
+        _fmt1dp(r.pressure),
         'hPa',
         DaqiUtils.forPressure(r.pressure).colour,
       ),
     ];
 
+    // Pressure Change — null on the very first reading
+    // (no prior pressure to compare to).
+    if (r.pressureChangePaPerSec != null) {
+      rows.add(
+        _MetricRow(
+          'Pressure Change',
+          _fmt1dp(r.pressureChangePaPerSec!),
+          'Pa/s',
+          DaqiUtils.forPressureGradient(r.pressureChangePaPerSec!).colour,
+        ),
+      );
+    }
+
     // Sensor-optional metrics (SGP41 not yet wired).
     final vocInfo = DaqiUtils.forTvoc(r.tvoc);
     if (vocInfo != null) {
-      rows.add(_MetricRow(
-        'VOC Index',
-        _fmtInt(r.tvoc!),
-        '',
-        vocInfo.colour,
-      ));
+      rows.add(_MetricRow('VOC Index', _fmtInt(r.tvoc!), '', vocInfo.colour));
     }
     final noxInfo = DaqiUtils.forNox(r.nox);
     if (noxInfo != null) {
-      rows.add(_MetricRow(
-        'NOx Index',
-        _fmtInt(r.nox!),
-        '',
-        noxInfo.colour,
-      ));
+      rows.add(_MetricRow('NOx Index', _fmtInt(r.nox!), '', noxInfo.colour));
     }
 
     return SingleChildScrollView(
@@ -269,10 +258,7 @@ class _ReadingFloatingWindowState extends State<ReadingFloatingWindow> {
           Expanded(
             child: Text(
               row.label,
-              style: TextStyle(
-                fontSize: 14,
-                color: AppColours.textPrimary,
-              ),
+              style: TextStyle(fontSize: 14, color: AppColours.textPrimary),
             ),
           ),
           Text(
@@ -287,10 +273,7 @@ class _ReadingFloatingWindowState extends State<ReadingFloatingWindow> {
             const SizedBox(width: 4),
             Text(
               row.unit,
-              style: TextStyle(
-                fontSize: 13,
-                color: AppColours.textSecondary,
-              ),
+              style: TextStyle(fontSize: 13, color: AppColours.textSecondary),
             ),
           ],
         ],
@@ -306,21 +289,15 @@ class _ReadingFloatingWindowState extends State<ReadingFloatingWindow> {
       padding: const EdgeInsets.fromLTRB(8, 4, 8, 16),
       shrinkWrap: true,
       itemCount: readings.length,
-      separatorBuilder: (_, __) => Divider(
-        height: 1,
-        thickness: 1,
-        color: AppColours.background,
-      ),
+      separatorBuilder: (_, __) =>
+          Divider(height: 1, thickness: 1, color: AppColours.background),
       itemBuilder: (_, i) {
         final r = readings[i];
         return InkWell(
           onTap: () => setState(() => _selectedReading = r),
           borderRadius: BorderRadius.circular(8),
           child: Padding(
-            padding: const EdgeInsets.symmetric(
-              horizontal: 12,
-              vertical: 14,
-            ),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
             child: Row(
               children: [
                 Expanded(
@@ -396,9 +373,6 @@ Future<void> showLiveReadingFloatingWindow(
     context: context,
     barrierDismissible: true,
     barrierColor: Colors.black.withValues(alpha: 0.35),
-    builder: (_) => ReadingFloatingWindow(
-      readings: readings,
-      title: title,
-    ),
+    builder: (_) => ReadingFloatingWindow(readings: readings, title: title),
   );
 }

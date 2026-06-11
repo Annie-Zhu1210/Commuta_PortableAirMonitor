@@ -8,7 +8,7 @@ import '../../core/constants/map_constants.dart';
 import '../../core/utils/daqi_utils.dart';
 import '../../core/utils/placeholder_overall_aqi.dart';
 import '../../data/datasources/air_quality_datasource.dart';
-import '../../data/datasources/mock_datasource.dart';
+import '../../services/app_services.dart';
 import '../../data/models/air_quality_reading.dart';
 import '../../data/models/geo_tagged_reading.dart';
 import '../../services/aqi_marker_builder.dart';
@@ -63,7 +63,7 @@ class _GoogleMapViewState extends State<GoogleMapView> {
   @override
   void initState() {
     super.initState();
-    _dataSource = MockDataSource();
+    _dataSource = AppServices.instance.dataSource;
     _dwellDetector = DwellDetector();
     _initLocation();
     _subscribeToReadings();
@@ -75,7 +75,6 @@ class _GoogleMapViewState extends State<GoogleMapView> {
     _readingSub?.cancel();
     _dwellSub?.cancel();
     _positionSub?.cancel();
-    _dataSource.dispose();
     _dwellDetector.dispose();
     _mapController?.dispose();
     for (final n in _collectionReadings.values) {

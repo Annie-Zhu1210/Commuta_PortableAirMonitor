@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../core/constants/app_colours.dart';
 import '../../core/utils/daqi_utils.dart';
-import '../../data/datasources/mock_datasource.dart';
+import '../../services/app_services.dart';
 import '../../data/datasources/air_quality_datasource.dart';
 import '../../data/models/air_quality_reading.dart';
 import '../../widgets/metric_card.dart';
@@ -16,7 +16,7 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   // Swap MockDataSource for BLEDataSource here when BLE is ready
-  final AirQualityDataSource _dataSource = MockDataSource();
+  final AirQualityDataSource _dataSource = AppServices.instance.dataSource;
 
   AirQualityReading? _latestReading;
   bool _isLoading = true;
@@ -38,9 +38,8 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
-  @override
   void dispose() {
-    _dataSource.dispose();
+    // _dataSource lifecycle is owned by AppServices — don't dispose here.
     super.dispose();
   }
 
@@ -98,18 +97,18 @@ class _HomeScreenState extends State<HomeScreen> {
                 const SizedBox(height: 12),
 
                 // ── UK DAQI card (from API) ──────────────────────────────
-                _UkDaqiCard(onInfoTap: () => _showApiInfoSheet(
-                  label: 'UK DAQI',
-                  unit:  '',
-                )),
+                _UkDaqiCard(
+                  onInfoTap: () =>
+                      _showApiInfoSheet(label: 'UK DAQI', unit: ''),
+                ),
 
                 const SizedBox(height: 12),
 
                 // ── Local Weather card (from API) ────────────────────────
-                _LocalWeatherCard(onInfoTap: () => _showApiInfoSheet(
-                  label: 'Local Weather',
-                  unit:  '',
-                )),
+                _LocalWeatherCard(
+                  onInfoTap: () =>
+                      _showApiInfoSheet(label: 'Local Weather', unit: ''),
+                ),
               ]),
             ),
           ),
@@ -128,26 +127,19 @@ class _HomeScreenState extends State<HomeScreen> {
   }) {
     MetricInfoSheet.show(
       context,
-      metricLabel:         infoSheetLabel,
-      unit:                unit,
+      metricLabel: infoSheetLabel,
+      unit: unit,
       initialNumericValue: numericValue,
-      initialDaqiInfo:     daqiInfo,
-      scaleSpec:           scaleSpec,
-      dataSource:          _dataSource,
-      extractor:           extractor,
+      initialDaqiInfo: daqiInfo,
+      scaleSpec: scaleSpec,
+      dataSource: _dataSource,
+      extractor: extractor,
     );
   }
 
-  void _showApiInfoSheet({
-    required String label,
-    required String unit,
-  }) {
+  void _showApiInfoSheet({required String label, required String unit}) {
     // API-driven cards have no live device data — no dataSource/extractor passed.
-    MetricInfoSheet.show(
-      context,
-      metricLabel: label,
-      unit:        unit,
-    );
+    MetricInfoSheet.show(context, metricLabel: label, unit: unit);
   }
 }
 
@@ -258,7 +250,8 @@ class _MetricGrid extends StatelessWidget {
     required DaqiInfo? daqiInfo,
     required BandScaleSpec? scaleSpec,
     required MetricExtractor extractor,
-  }) onInfoTap;
+  })
+  onInfoTap;
 
   const _MetricGrid({required this.reading, required this.onInfoTap});
 
@@ -270,26 +263,26 @@ class _MetricGrid extends StatelessWidget {
       shrinkWrap: true,
       physics: const NeverScrollableScrollPhysics(),
       gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount:     2,
-        crossAxisSpacing:  12,
-        mainAxisSpacing:   12,
-        childAspectRatio:  1.35,
+        crossAxisCount: 2,
+        crossAxisSpacing: 12,
+        mainAxisSpacing: 12,
+        childAspectRatio: 1.35,
       ),
       itemCount: metrics.length,
       itemBuilder: (context, index) {
         final m = metrics[index];
         return MetricCard(
-          label:    m.label,
-          unit:     m.unit,
-          value:    m.value,
+          label: m.label,
+          unit: m.unit,
+          value: m.value,
           daqiInfo: m.daqiInfo,
           onInfoTap: () => onInfoTap(
             infoSheetLabel: m.infoSheetLabel,
-            unit:           m.unit,
-            numericValue:   m.numericValue,
-            daqiInfo:       m.daqiInfo,
-            scaleSpec:      m.scaleSpec,
-            extractor:      m.extractor,
+            unit: m.unit,
+            numericValue: m.numericValue,
+            daqiInfo: m.daqiInfo,
+            scaleSpec: m.scaleSpec,
+            extractor: m.extractor,
           ),
         );
       },
@@ -299,81 +292,94 @@ class _MetricGrid extends StatelessWidget {
   List<_MetricSpec> _buildMetrics(AirQualityReading r) {
     return [
       _MetricSpec(
-        label:        'PM2.5',
-        unit:         'µg/m³',
-        value:        r.pm25.toStringAsFixed(1),
+        label: 'PM2.5',
+        unit: 'µg/m³',
+        value: r.pm25.toStringAsFixed(1),
         numericValue: r.pm25,
-        daqiInfo:     DaqiUtils.forPm25(r.pm25),
-        scaleSpec:    MetricScales.pm25,
-        extractor:    (rr) => (numericValue: rr.pm25, daqiInfo: DaqiUtils.forPm25(rr.pm25)),
+        daqiInfo: DaqiUtils.forPm25(r.pm25),
+        scaleSpec: MetricScales.pm25,
+        extractor: (rr) =>
+            (numericValue: rr.pm25, daqiInfo: DaqiUtils.forPm25(rr.pm25)),
       ),
       _MetricSpec(
-        label:        'PM10',
-        unit:         'µg/m³',
-        value:        r.pm10.toStringAsFixed(1),
+        label: 'PM10',
+        unit: 'µg/m³',
+        value: r.pm10.toStringAsFixed(1),
         numericValue: r.pm10,
-        daqiInfo:     DaqiUtils.forPm10(r.pm10),
-        scaleSpec:    MetricScales.pm10,
-        extractor:    (rr) => (numericValue: rr.pm10, daqiInfo: DaqiUtils.forPm10(rr.pm10)),
+        daqiInfo: DaqiUtils.forPm10(r.pm10),
+        scaleSpec: MetricScales.pm10,
+        extractor: (rr) =>
+            (numericValue: rr.pm10, daqiInfo: DaqiUtils.forPm10(rr.pm10)),
       ),
       _MetricSpec(
-        label:        'PM1',
-        unit:         'µg/m³',
-        value:        r.pm1.toStringAsFixed(1),
+        label: 'PM1',
+        unit: 'µg/m³',
+        value: r.pm1.toStringAsFixed(1),
         numericValue: r.pm1,
-        daqiInfo:     DaqiUtils.forPm1(r.pm1),
-        scaleSpec:    MetricScales.pm1,
-        extractor:    (rr) => (numericValue: rr.pm1, daqiInfo: DaqiUtils.forPm1(rr.pm1)),
+        daqiInfo: DaqiUtils.forPm1(r.pm1),
+        scaleSpec: MetricScales.pm1,
+        extractor: (rr) =>
+            (numericValue: rr.pm1, daqiInfo: DaqiUtils.forPm1(rr.pm1)),
       ),
       _MetricSpec(
-        label:        'CO₂',
-        unit:         'ppm',
-        value:        r.co2.toStringAsFixed(0),
+        label: 'CO₂',
+        unit: 'ppm',
+        value: r.co2.toStringAsFixed(0),
         numericValue: r.co2,
-        daqiInfo:     DaqiUtils.forCo2(r.co2),
-        scaleSpec:    MetricScales.co2,
-        extractor:    (rr) => (numericValue: rr.co2, daqiInfo: DaqiUtils.forCo2(rr.co2)),
+        daqiInfo: DaqiUtils.forCo2(r.co2),
+        scaleSpec: MetricScales.co2,
+        extractor: (rr) =>
+            (numericValue: rr.co2, daqiInfo: DaqiUtils.forCo2(rr.co2)),
       ),
       _MetricSpec(
-        label:        'Temperature',
-        unit:         '°C',
-        value:        r.temperature.toStringAsFixed(1),
+        label: 'Temperature',
+        unit: '°C',
+        value: r.temperature.toStringAsFixed(1),
         numericValue: r.temperature,
-        daqiInfo:     DaqiUtils.forTemperature(r.temperature),
-        scaleSpec:    MetricScales.temperature,
-        extractor:    (rr) => (numericValue: rr.temperature, daqiInfo: DaqiUtils.forTemperature(rr.temperature)),
+        daqiInfo: DaqiUtils.forTemperature(r.temperature),
+        scaleSpec: MetricScales.temperature,
+        extractor: (rr) => (
+          numericValue: rr.temperature,
+          daqiInfo: DaqiUtils.forTemperature(rr.temperature),
+        ),
       ),
       _MetricSpec(
-        label:        'Humidity',
-        unit:         '%',
-        value:        r.humidity.toStringAsFixed(1),
+        label: 'Humidity',
+        unit: '%',
+        value: r.humidity.toStringAsFixed(1),
         numericValue: r.humidity,
-        daqiInfo:     DaqiUtils.forHumidity(r.humidity),
-        scaleSpec:    MetricScales.humidity,
-        extractor:    (rr) => (numericValue: rr.humidity, daqiInfo: DaqiUtils.forHumidity(rr.humidity)),
+        daqiInfo: DaqiUtils.forHumidity(r.humidity),
+        scaleSpec: MetricScales.humidity,
+        extractor: (rr) => (
+          numericValue: rr.humidity,
+          daqiInfo: DaqiUtils.forHumidity(rr.humidity),
+        ),
       ),
       _MetricSpec(
-        label:        'Air Pressure',
-        unit:         'hPa',
-        value:        r.pressure.toStringAsFixed(1),
+        label: 'Air Pressure',
+        unit: 'hPa',
+        value: r.pressure.toStringAsFixed(1),
         numericValue: r.pressure,
-        daqiInfo:     DaqiUtils.forPressure(r.pressure),
-        scaleSpec:    MetricScales.pressure,
-        extractor:    (rr) => (numericValue: rr.pressure, daqiInfo: DaqiUtils.forPressure(rr.pressure)),
+        daqiInfo: DaqiUtils.forPressure(r.pressure),
+        scaleSpec: MetricScales.pressure,
+        extractor: (rr) => (
+          numericValue: rr.pressure,
+          daqiInfo: DaqiUtils.forPressure(rr.pressure),
+        ),
       ),
       // Card title kept short for the grid; the info sheet uses the full name.
       _MetricSpec(
-        label:          'Pressure Change',
+        label: 'Pressure Change',
         infoSheetLabel: 'Absolute Air Pressure Change',
-        unit:           'Pa/s',
-        value:          r.pressureChangePaPerSec != null
+        unit: 'Pa/s',
+        value: r.pressureChangePaPerSec != null
             ? r.pressureChangePaPerSec!.toStringAsFixed(1)
             : '—',
-        numericValue:   r.pressureChangePaPerSec,
-        daqiInfo:       r.pressureChangePaPerSec != null
+        numericValue: r.pressureChangePaPerSec,
+        daqiInfo: r.pressureChangePaPerSec != null
             ? DaqiUtils.forPressureGradient(r.pressureChangePaPerSec!)
             : null,
-        scaleSpec:      MetricScales.pressureChange,
+        scaleSpec: MetricScales.pressureChange,
         extractor: (rr) => (
           numericValue: rr.pressureChangePaPerSec,
           daqiInfo: rr.pressureChangePaPerSec != null
@@ -384,29 +390,31 @@ class _MetricGrid extends StatelessWidget {
       // VOC Index and NOx Index are dimensionless (Sensirion SGP41 scaled 1–500),
       // so unit is empty. Values are null until SGP41 is integrated.
       _MetricSpec(
-        label:        'VOC Index',
-        unit:         '',
-        value:        r.tvoc != null ? r.tvoc!.toStringAsFixed(0) : '—',
+        label: 'VOC Index',
+        unit: '',
+        value: r.tvoc != null ? r.tvoc!.toStringAsFixed(0) : '—',
         numericValue: r.tvoc,
-        daqiInfo:     DaqiUtils.forTvoc(r.tvoc),
-        scaleSpec:    MetricScales.vocIndex,
-        extractor:    (rr) => (numericValue: rr.tvoc, daqiInfo: DaqiUtils.forTvoc(rr.tvoc)),
+        daqiInfo: DaqiUtils.forTvoc(r.tvoc),
+        scaleSpec: MetricScales.vocIndex,
+        extractor: (rr) =>
+            (numericValue: rr.tvoc, daqiInfo: DaqiUtils.forTvoc(rr.tvoc)),
       ),
       _MetricSpec(
-        label:        'NOx Index',
-        unit:         '',
-        value:        r.nox != null ? r.nox!.toStringAsFixed(0) : '—',
+        label: 'NOx Index',
+        unit: '',
+        value: r.nox != null ? r.nox!.toStringAsFixed(0) : '—',
         numericValue: r.nox,
-        daqiInfo:     DaqiUtils.forNox(r.nox),
-        scaleSpec:    MetricScales.noxIndex,
-        extractor:    (rr) => (numericValue: rr.nox, daqiInfo: DaqiUtils.forNox(rr.nox)),
+        daqiInfo: DaqiUtils.forNox(r.nox),
+        scaleSpec: MetricScales.noxIndex,
+        extractor: (rr) =>
+            (numericValue: rr.nox, daqiInfo: DaqiUtils.forNox(rr.nox)),
       ),
     ];
   }
 }
 
 class _MetricSpec {
-  final String label;          // shown on the metric card
+  final String label; // shown on the metric card
   final String infoSheetLabel; // shown on the bottom sheet (defaults to label)
   final String unit;
   final String? value;
@@ -443,14 +451,14 @@ class _UkDaqiCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return _ApiCardShell(
-      icon:       Icons.public_outlined,
+      icon: Icons.public_outlined,
       iconColour: AppColours.accentSecondary,
-      title:      'UK DAQI',
-      subtitle:   'Outdoor air quality (DEFRA)',
+      title: 'UK DAQI',
+      subtitle: 'Outdoor air quality (DEFRA)',
       // TODO: Wire up DEFRA / outdoor AQI API. When connected, replace this
       //       placeholder with the live DAQI band returned from the API.
-      trailing:   const _PlaceholderBandPill(),
-      onInfoTap:  onInfoTap,
+      trailing: const _PlaceholderBandPill(),
+      onInfoTap: onInfoTap,
     );
   }
 }
@@ -466,13 +474,13 @@ class _LocalWeatherCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return _ApiCardShell(
-      icon:       Icons.wb_cloudy_outlined,
+      icon: Icons.wb_cloudy_outlined,
       iconColour: AppColours.accentSecondary,
-      title:      'Local Weather',
-      subtitle:   'Temperature, conditions',
+      title: 'Local Weather',
+      subtitle: 'Temperature, conditions',
       // TODO: Wire up weather API (OpenWeather, Met Office, etc.).
       //       No band pill — weather has no DAQI band.
-      trailing:   const Text(
+      trailing: const Text(
         '—',
         style: TextStyle(
           fontSize: 20,
@@ -480,7 +488,7 @@ class _LocalWeatherCard extends StatelessWidget {
           color: AppColours.textSecondary,
         ),
       ),
-      onInfoTap:  onInfoTap,
+      onInfoTap: onInfoTap,
     );
   }
 }

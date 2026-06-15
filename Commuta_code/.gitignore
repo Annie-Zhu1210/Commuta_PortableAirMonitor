@@ -1,0 +1,25 @@
+# ---------- project-private config ----------
+secrets.h
+
+# ---------- Arduino build artefacts ----------
+build/
+*.hex
+*.elf
+*.bin
+*.map
+
+# Arduino IDE 2.x local cache
+.vscode/
+.theia/
+
+# ---------- macOS ----------
+.DS_Store
+
+# ---------- Windows ----------
+Thumbs.db
+desktop.ini
+
+# ---------- Editor swap / backup files ----------
+*~
+*.swp
+*.swo

@@ -16,10 +16,13 @@
 #include <VOCGasIndexAlgorithm.h>
 #include <NOxGasIndexAlgorithm.h>
 
+#include "ble.h"
+
 // ---------- pin map ----------
 #define PIN_BUTTON 27
 #define PIN_LED_RED 32
 #define PIN_LED_GREEN 33
+#define PIN_BATTERY_ADC 35  // internal, divider on board, reads Vbat/2
 
 // ---------- sensor objects ----------
 SensirionI2cSps30 sps30;
@@ -43,19 +46,28 @@ uint16_t srawNox = 0;
 int32_t vocIndex = 0;
 int32_t noxIndex = 0;
 
-// ---------- SCD40 latest readings (fed back into SGP41 compensation) ----------
-float latestT = 25.0f;
+// ---------- Latest sensor readings (used for both serial print and BLE) ----------
+// These persist across loop iterations so that, if a single read fails, the
+// BLE packet still carries the most recent valid value rather than zero.
+float latestPm1 = 0.0f, latestPm25 = 0.0f, latestPm10 = 0.0f;
+uint16_t latestCo2 = 0;
+float latestT = 25.0f;  // also fed back into SGP41 compensation
 float latestRh = 50.0f;
+float latestPressure = 0.0f;
 bool haveScdReading = false;
+
+// ---------- BLE sample state ----------
+uint32_t sampleSequence = 0;    // increments every BLE sample
+bool buttonEventPending = false;  // set on press, cleared when sample is sent
 
 // ---------- button debounce ----------
 int lastButtonState = HIGH;
 unsigned long lastButtonChange = 0;
 const unsigned long BUTTON_DEBOUNCE_MS = 50;
 
-// ---------- print cadence ----------
+// ---------- print / sample cadence ----------
 unsigned long lastPrint = 0;
-const unsigned long PRINT_INTERVAL_MS = 10000;
+const unsigned long PRINT_INTERVAL_MS = 10000;  // also the BLE sample interval
 
 // ---------- helpers ----------
 uint16_t humidityToTicks(float rh) {
@@ -67,6 +79,18 @@ uint16_t temperatureToTicks(float t) {
   if (t < -45) t = -45;
   if (t > 130) t = 130;
   return (uint16_t)(((t + 45.0f) * 65535.0f) / 175.0f);
+}
+
+// Rough battery percentage from GPIO35 (internal Vbat/2 divider on the HUZZAH32).
+// First-pass linear map only: ESP32 ADC is non-linear near the rails and the LiPo
+// discharge curve isn't actually linear either. Improve once we have bench data.
+uint8_t readBatteryPercent() {
+  int raw = analogRead(PIN_BATTERY_ADC);
+  float vbat = (raw / 4095.0f) * 3.3f * 2.0f;  // double because of /2 divider
+  int pct = (int)((vbat - 3.3f) / (4.2f - 3.3f) * 100.0f);
+  if (pct < 0) pct = 0;
+  if (pct > 100) pct = 100;
+  return (uint8_t)pct;
 }
 
 void sampleSgp41() {
@@ -136,6 +160,10 @@ void setup() {
     Serial.println("SGP41 OK");
   }
 
+  // BLE: start advertising before the warmup delay so the device is discoverable
+  // from the phone right away.
+  commutaBleSetup();
+
   Serial.println("Warming up sensors for 30 seconds...");
   delay(30000);
 
@@ -156,19 +184,19 @@ void loop() {
     sampleSgp41();
   }
 
-  // Button (debounced, active LOW). Placeholder action: print timestamp to serial.
+  // Button (debounced, active LOW). Records an event for the next BLE sample.
   int bs = digitalRead(PIN_BUTTON);
   if (bs != lastButtonState && (millis() - lastButtonChange) > BUTTON_DEBOUNCE_MS) {
     lastButtonChange = millis();
     lastButtonState = bs;
     if (bs == LOW) {
+      buttonEventPending = true;
       Serial.print(">>> Button pressed at ");
       Serial.println(millis());
-      // TODO: hook to event-marking / app sync later.
     }
   }
 
-  // Print all sensors every PRINT_INTERVAL_MS.
+  // Print sensors and notify BLE every PRINT_INTERVAL_MS.
   if (millis() - lastPrint < PRINT_INTERVAL_MS) return;
   lastPrint = millis();
   Serial.println("-----------------------------");
@@ -181,6 +209,9 @@ void loop() {
                                        nc05, nc1, nc25, nc4, nc10, tps)) {
     Serial.println("SPS30: No reading");
   } else {
+    latestPm1 = pm1;
+    latestPm25 = pm25;
+    latestPm10 = pm10;
     Serial.print("PM1.0: ");
     Serial.print(pm1);
     Serial.println(" ug/m3");
@@ -202,6 +233,7 @@ void loop() {
   scd4x.getDataReadyStatus(ready);
   if (ready) {
     scd4x.readMeasurement(co2, t, rh);
+    latestCo2 = co2;
     latestT = t;
     latestRh = rh;
     haveScdReading = true;
@@ -223,6 +255,7 @@ void loop() {
   sensors_event_t pe;
   if (dps.pressureAvailable()) {
     dps_pressure->getEvent(&pe);
+    latestPressure = pe.pressure;
     Serial.print("Pressure: ");
     Serial.print(pe.pressure);
     Serial.println(" hPa");
@@ -245,4 +278,43 @@ void loop() {
     Serial.print("NOx Idx:  ");
     Serial.println(noxIndex);
   }
+
+  // --- Build and send BLE sample ---
+  uint8_t batteryPct = readBatteryPercent();
+
+  CommutaSample sample = {};
+  sample.sequence = sampleSequence++;
+  sample.pm1 = latestPm1;
+  sample.pm25 = latestPm25;
+  sample.pm10 = latestPm10;
+  sample.co2 = latestCo2;
+  sample.temperature = latestT;
+  sample.humidity = latestRh;
+  sample.pressure = latestPressure;
+  sample.sraw_voc = srawVoc;
+  sample.sraw_nox = srawNox;
+  sample.voc_index = (int16_t)vocIndex;
+  sample.nox_index = (int16_t)noxIndex;
+  sample.flags = 0;
+  if (conditioning) sample.flags |= COMMUTA_FLAG_CONDITIONING;
+  if (buttonEventPending) {
+    sample.flags |= COMMUTA_FLAG_BUTTON_EVENT;
+    buttonEventPending = false;
+  }
+  sample.battery_pct = batteryPct;
+  commutaBleNotifyLive(sample);
+
+  // Update status characteristic too.
+  CommutaStatus status = {};
+  status.uptime_seconds = millis() / 1000;
+  status.total_samples = sampleSequence;
+  status.buffered_samples = 0;  // until LittleFS buffer is added
+  status.battery_pct = batteryPct;
+  status.flags = sample.flags & COMMUTA_FLAG_CONDITIONING;
+  commutaBleUpdateStatus(status);
+
+  Serial.print("Bat:  ");
+  Serial.print(batteryPct);
+  Serial.print(" %  BLE: ");
+  Serial.println(commutaBleIsConnected() ? "connected" : "advertising");
 }

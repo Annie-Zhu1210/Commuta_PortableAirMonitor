@@ -17,6 +17,7 @@
 #include <NOxGasIndexAlgorithm.h>
 
 #include "ble.h"
+#include "storage.h"
 
 // ---------- pin map ----------
 #define PIN_BUTTON 27
@@ -51,19 +52,13 @@ int32_t noxIndex = 0;
 // BLE packet still carries the most recent valid value rather than zero.
 float latestPm1 = 0.0f, latestPm25 = 0.0f, latestPm10 = 0.0f;
 uint16_t latestCo2 = 0;
-float latestT = 25.0f;  // also fed back into SGP41 compensation
+float latestT = 25.0f;
 float latestRh = 50.0f;
 float latestPressure = 0.0f;
 bool haveScdReading = false;
 
 // ---------- BLE sample state ----------
-uint32_t sampleSequence = 0;    // increments every BLE sample
-bool buttonEventPending = false;  // set on press, cleared when sample is sent
-
-// ---------- button debounce ----------
-int lastButtonState = HIGH;
-unsigned long lastButtonChange = 0;
-const unsigned long BUTTON_DEBOUNCE_MS = 50;
+uint32_t sampleSequence = 0;  // increments every BLE sample; restored from storage on boot
 
 // ---------- print / sample cadence ----------
 unsigned long lastPrint = 0;
@@ -86,7 +81,7 @@ uint16_t temperatureToTicks(float t) {
 // discharge curve isn't actually linear either. Improve once we have bench data.
 uint8_t readBatteryPercent() {
   int raw = analogRead(PIN_BATTERY_ADC);
-  float vbat = (raw / 4095.0f) * 3.3f * 2.0f;  // double because of /2 divider
+  float vbat = (raw / 4095.0f) * 3.3f * 2.0f;
   int pct = (int)((vbat - 3.3f) / (4.2f - 3.3f) * 100.0f);
   if (pct < 0) pct = 0;
   if (pct > 100) pct = 100;
@@ -97,7 +92,6 @@ void sampleSgp41() {
   bool conditioning = (millis() - sgp41StartMs) < SGP41_CONDITIONING_MS;
   uint16_t err;
   if (conditioning) {
-    // Conditioning phase: returns SRAW_VOC only; NOx pixel is warming up.
     err = sgp41.executeConditioning(SGP41_DEFAULT_RH, SGP41_DEFAULT_T, srawVoc);
     srawNox = 0;
   } else {
@@ -116,7 +110,9 @@ void setup() {
   while (!Serial) delay(10);
   Serial.println("Commuta - Air Quality Monitor");
 
-  // GPIO
+  // GPIO. LED stays as-is (continuously green) for now; button is wired but
+  // unused — gesture detection (long-press power, double-press status) lands
+  // in a future session.
   pinMode(PIN_BUTTON, INPUT_PULLUP);
   pinMode(PIN_LED_RED, OUTPUT);
   pinMode(PIN_LED_GREEN, OUTPUT);
@@ -125,6 +121,15 @@ void setup() {
 
   // I2C
   Wire.begin(23, 22);  // SDA=23, SCL=22
+
+  // Storage: mount LittleFS, scan /buf/ for existing samples, and pick up
+  // the sample sequence number from the highest-numbered segment on disk.
+  if (!commutaStorageBegin()) {
+    Serial.println("storage: WARN init failed; buffering disabled");
+  } else {
+    sampleSequence = commutaStorageNextSequence();
+    Serial.printf("storage: resuming at sequence %u\n", (unsigned)sampleSequence);
+  }
 
   // SPS30
   sps30.begin(Wire, 0x69);
@@ -160,15 +165,14 @@ void setup() {
     Serial.println("SGP41 OK");
   }
 
-  // BLE: start advertising before the warmup delay so the device is discoverable
-  // from the phone right away.
+  // BLE: start advertising before the warmup delay so the device is
+  // discoverable from the phone right away.
   commutaBleSetup();
 
   Serial.println("Warming up sensors for 30 seconds...");
   delay(30000);
 
-  // Mark SGP41 conditioning start AFTER the warmup delay, so the 10-s
-  // executeConditioning() phase actually runs inside loop().
+  // Mark SGP41 conditioning start AFTER the warmup delay.
   sgp41StartMs = millis();
   lastSgp41Ms = millis();
 
@@ -184,17 +188,10 @@ void loop() {
     sampleSgp41();
   }
 
-  // Button (debounced, active LOW). Records an event for the next BLE sample.
-  int bs = digitalRead(PIN_BUTTON);
-  if (bs != lastButtonState && (millis() - lastButtonChange) > BUTTON_DEBOUNCE_MS) {
-    lastButtonChange = millis();
-    lastButtonState = bs;
-    if (bs == LOW) {
-      buttonEventPending = true;
-      Serial.print(">>> Button pressed at ");
-      Serial.println(millis());
-    }
-  }
+  // Service buffered-sync streaming. Runs every loop iteration; cheap when
+  // no sync is active. Sends at most one BLE notification per call so the
+  // main loop stays responsive.
+  commutaBleServiceSync();
 
   // Print sensors and notify BLE every PRINT_INTERVAL_MS.
   if (millis() - lastPrint < PRINT_INTERVAL_MS) return;
@@ -212,18 +209,10 @@ void loop() {
     latestPm1 = pm1;
     latestPm25 = pm25;
     latestPm10 = pm10;
-    Serial.print("PM1.0: ");
-    Serial.print(pm1);
-    Serial.println(" ug/m3");
-    Serial.print("PM2.5: ");
-    Serial.print(pm25);
-    Serial.println(" ug/m3");
-    Serial.print("PM4.0: ");
-    Serial.print(pm4);
-    Serial.println(" ug/m3");
-    Serial.print("PM10:  ");
-    Serial.print(pm10);
-    Serial.println(" ug/m3");
+    Serial.print("PM1.0: "); Serial.print(pm1); Serial.println(" ug/m3");
+    Serial.print("PM2.5: "); Serial.print(pm25); Serial.println(" ug/m3");
+    Serial.print("PM4.0: "); Serial.print(pm4); Serial.println(" ug/m3");
+    Serial.print("PM10:  "); Serial.print(pm10); Serial.println(" ug/m3");
   }
 
   // --- SCD40 ---
@@ -237,15 +226,9 @@ void loop() {
     latestT = t;
     latestRh = rh;
     haveScdReading = true;
-    Serial.print("CO2:  ");
-    Serial.print(co2);
-    Serial.println(" ppm");
-    Serial.print("Temp: ");
-    Serial.print(t);
-    Serial.println(" C");
-    Serial.print("Hum:  ");
-    Serial.print(rh);
-    Serial.println(" %");
+    Serial.print("CO2:  "); Serial.print(co2); Serial.println(" ppm");
+    Serial.print("Temp: "); Serial.print(t); Serial.println(" C");
+    Serial.print("Hum:  "); Serial.print(rh); Serial.println(" %");
   } else {
     Serial.println("SCD40: No reading yet");
   }
@@ -256,30 +239,24 @@ void loop() {
   if (dps.pressureAvailable()) {
     dps_pressure->getEvent(&pe);
     latestPressure = pe.pressure;
-    Serial.print("Pressure: ");
-    Serial.print(pe.pressure);
-    Serial.println(" hPa");
+    Serial.print("Pressure: "); Serial.print(pe.pressure); Serial.println(" hPa");
   } else {
     Serial.println("DPS368: No reading yet");
   }
 
   // --- SGP41 ---
   bool conditioning = (millis() - sgp41StartMs) < SGP41_CONDITIONING_MS;
-  Serial.print("SRAW VOC: ");
-  Serial.println(srawVoc);
-  Serial.print("VOC Idx:  ");
-  Serial.println(vocIndex);
+  Serial.print("SRAW VOC: "); Serial.println(srawVoc);
+  Serial.print("VOC Idx:  "); Serial.println(vocIndex);
   if (conditioning) {
     Serial.println("SRAW NOx: (conditioning)");
     Serial.println("NOx Idx:  (conditioning)");
   } else {
-    Serial.print("SRAW NOx: ");
-    Serial.println(srawNox);
-    Serial.print("NOx Idx:  ");
-    Serial.println(noxIndex);
+    Serial.print("SRAW NOx: "); Serial.println(srawNox);
+    Serial.print("NOx Idx:  "); Serial.println(noxIndex);
   }
 
-  // --- Build and send BLE sample ---
+  // --- Build the sample, persist it, and notify BLE ---
   uint8_t batteryPct = readBatteryPercent();
 
   CommutaSample sample = {};
@@ -295,26 +272,28 @@ void loop() {
   sample.sraw_nox = srawNox;
   sample.voc_index = (int16_t)vocIndex;
   sample.nox_index = (int16_t)noxIndex;
-  sample.flags = 0;
-  if (conditioning) sample.flags |= COMMUTA_FLAG_CONDITIONING;
-  if (buttonEventPending) {
-    sample.flags |= COMMUTA_FLAG_BUTTON_EVENT;
-    buttonEventPending = false;
-  }
+  sample.flags = conditioning ? COMMUTA_FLAG_CONDITIONING : 0;
   sample.battery_pct = batteryPct;
+
+  // Persist to flash first, then notify the Live characteristic.
+  commutaStorageAppend(sample);
   commutaBleNotifyLive(sample);
 
-  // Update status characteristic too.
+  // --- Update Status characteristic ---
+  uint32_t oldestSeq, newestSeq, bufferedCount;
+  commutaStorageGetRange(oldestSeq, newestSeq, bufferedCount);
+
   CommutaStatus status = {};
   status.uptime_seconds = millis() / 1000;
   status.total_samples = sampleSequence;
-  status.buffered_samples = 0;  // until LittleFS buffer is added
+  status.oldest_buffered_seq = oldestSeq;
+  status.newest_buffered_seq = newestSeq;
+  status.buffered_count = bufferedCount;
   status.battery_pct = batteryPct;
   status.flags = sample.flags & COMMUTA_FLAG_CONDITIONING;
   commutaBleUpdateStatus(status);
 
-  Serial.print("Bat:  ");
-  Serial.print(batteryPct);
-  Serial.print(" %  BLE: ");
-  Serial.println(commutaBleIsConnected() ? "connected" : "advertising");
+  Serial.print("Bat:  "); Serial.print(batteryPct);
+  Serial.print(" %  Buf: "); Serial.print(bufferedCount);
+  Serial.print("  BLE: "); Serial.println(commutaBleIsConnected() ? "connected" : "advertising");
 }

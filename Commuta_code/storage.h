@@ -13,7 +13,7 @@
 //
 // Each file holds at most RECORDS_PER_SEGMENT contiguous samples; oldest
 // files are deleted when MAX_SEGMENTS would be exceeded. Sequence numbers
-// are global and monotonic - they survive reboots because they are
+// are global and monotonic — they survive reboots because they are
 // reconstructed from the highest-numbered filename plus its record count.
 
 #ifndef COMMUTA_STORAGE_H

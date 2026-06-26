@@ -49,7 +49,11 @@ typedef struct __attribute__((packed)) {
 } CommutaStatus;
 
 // Flag bits used in both sample.flags and status.flags.
-#define COMMUTA_FLAG_CONDITIONING (1 << 0)  // SGP41 NOx pixel warming up
+#define COMMUTA_FLAG_CONDITIONING  (1 << 0)  // SGP41 NOx pixel warming up
+// Status-only flag. Sent in the very last Status notification before the
+// device enters deep sleep. The phone treats the range fields in this
+// Status as final and shows the unsynced count to the user.
+#define COMMUTA_FLAG_SHUTTING_DOWN (1 << 1)
 
 // ---------- Sync protocol ----------
 // Wire format for the Buffered characteristic:
@@ -100,6 +104,10 @@ void commutaBleUpdateStatus(const CommutaStatus &status);
 
 // True if at least one central is currently connected.
 bool commutaBleIsConnected();
+
+// True if a buffered-sync stream is mid-flight (used by the shutdown
+// sequence to decide whether to send one more frame before sleeping).
+bool commutaBleIsSyncActive();
 
 // Drive the buffered-sync state machine. Call from the main loop on every
 // iteration. Cheap when no sync is pending; sends at most one notification

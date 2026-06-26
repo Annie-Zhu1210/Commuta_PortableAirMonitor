@@ -154,6 +154,8 @@ void commutaBleUpdateStatus(const CommutaStatus& status) {
 
 bool commutaBleIsConnected() { return g_connected; }
 
+bool commutaBleIsSyncActive() { return g_syncActive; }
+
 // ---------- Sync streaming ----------
 // Data and EOS frames are sent as one-off notifications without touching
 // the characteristic's stored value, since the Buffered characteristic is

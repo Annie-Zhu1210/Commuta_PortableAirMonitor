@@ -22,9 +22,11 @@ part 'app_database.g.dart';
 ///   `StationClassificationService` runs (Phase 5+). Readings without
 ///   a station are still kept; classification doesn't gate
 ///   persistence.
-/// * `nox` and `tvoc` are nullable today (SGP41 not yet wired). When
-///   the sensor lands, bump the schemaVersion and add a migration
-///   that backfills any default if needed.
+/// * `nox` and `tvoc` are nullable because the SGP41 sensor warms up
+///   in CONDITIONING mode after device boot; samples received in that
+///   window have nulls for both. The raw counterparts `noxRaw` and
+///   `vocRaw` are populated regardless of conditioning state and are
+///   preserved primarily for the dissertation's JSON export.
 class Readings extends Table {
   IntColumn get id => integer().autoIncrement()();
 
@@ -41,6 +43,14 @@ class Readings extends Table {
   RealColumn get pressureChangePaPerSec => real().nullable()();
   RealColumn get nox => real().nullable()();
   RealColumn get tvoc => real().nullable()();
+
+  /// SGP41 raw VOC ticks (uint16 on the wire). Always populated,
+  /// even during CONDITIONING. Database-only; surfaced in JSON export.
+  IntColumn get vocRaw => integer().nullable()();
+
+  /// SGP41 raw NOx ticks (uint16 on the wire). Always populated,
+  /// even during CONDITIONING. Database-only; surfaced in JSON export.
+  IntColumn get noxRaw => integer().nullable()();
 
   TextColumn get sourceFlag => text()();
 
@@ -62,8 +72,11 @@ class AppDatabase extends _$AppDatabase {
 
   /// Bump this when the schema changes (new column, new table,
   /// nullability change). Drift uses it to drive migrations.
+  ///
+  /// v1 → v2 (BLE integration, Step 2): added `vocRaw` and `noxRaw`
+  /// to preserve the SGP41 raw counts alongside the processed indices.
   @override
-  int get schemaVersion => 1;
+  int get schemaVersion => 2;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -71,11 +84,10 @@ class AppDatabase extends _$AppDatabase {
       await m.createAll();
     },
     onUpgrade: (m, from, to) async {
-      // No migrations yet. When SGP41 lands or new tables arrive,
-      // add cases here, e.g.:
-      //   if (from < 2) {
-      //     await m.addColumn(readings, readings.someNewColumn);
-      //   }
+      if (from < 2) {
+        await m.addColumn(readings, readings.vocRaw);
+        await m.addColumn(readings, readings.noxRaw);
+      }
     },
   );
 }

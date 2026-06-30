@@ -141,6 +141,24 @@ class $ReadingsTable extends Readings with TableInfo<$ReadingsTable, Reading> {
     type: DriftSqlType.double,
     requiredDuringInsert: false,
   );
+  static const VerificationMeta _vocRawMeta = const VerificationMeta('vocRaw');
+  @override
+  late final GeneratedColumn<int> vocRaw = GeneratedColumn<int>(
+    'voc_raw',
+    aliasedName,
+    true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _noxRawMeta = const VerificationMeta('noxRaw');
+  @override
+  late final GeneratedColumn<int> noxRaw = GeneratedColumn<int>(
+    'nox_raw',
+    aliasedName,
+    true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+  );
   static const VerificationMeta _sourceFlagMeta = const VerificationMeta(
     'sourceFlag',
   );
@@ -205,6 +223,8 @@ class $ReadingsTable extends Readings with TableInfo<$ReadingsTable, Reading> {
     pressureChangePaPerSec,
     nox,
     tvoc,
+    vocRaw,
+    noxRaw,
     sourceFlag,
     stationId,
     lineId,
@@ -325,6 +345,18 @@ class $ReadingsTable extends Readings with TableInfo<$ReadingsTable, Reading> {
         tvoc.isAcceptableOrUnknown(data['tvoc']!, _tvocMeta),
       );
     }
+    if (data.containsKey('voc_raw')) {
+      context.handle(
+        _vocRawMeta,
+        vocRaw.isAcceptableOrUnknown(data['voc_raw']!, _vocRawMeta),
+      );
+    }
+    if (data.containsKey('nox_raw')) {
+      context.handle(
+        _noxRawMeta,
+        noxRaw.isAcceptableOrUnknown(data['nox_raw']!, _noxRawMeta),
+      );
+    }
     if (data.containsKey('source_flag')) {
       context.handle(
         _sourceFlagMeta,
@@ -422,6 +454,14 @@ class $ReadingsTable extends Readings with TableInfo<$ReadingsTable, Reading> {
         DriftSqlType.double,
         data['${effectivePrefix}tvoc'],
       ),
+      vocRaw: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}voc_raw'],
+      ),
+      noxRaw: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}nox_raw'],
+      ),
       sourceFlag: attachedDatabase.typeMapping.read(
         DriftSqlType.string,
         data['${effectivePrefix}source_flag'],
@@ -465,6 +505,14 @@ class Reading extends DataClass implements Insertable<Reading> {
   final double? pressureChangePaPerSec;
   final double? nox;
   final double? tvoc;
+
+  /// SGP41 raw VOC ticks (uint16 on the wire). Always populated,
+  /// even during CONDITIONING. Database-only; surfaced in JSON export.
+  final int? vocRaw;
+
+  /// SGP41 raw NOx ticks (uint16 on the wire). Always populated,
+  /// even during CONDITIONING. Database-only; surfaced in JSON export.
+  final int? noxRaw;
   final String sourceFlag;
   final String? stationId;
   final String? lineId;
@@ -484,6 +532,8 @@ class Reading extends DataClass implements Insertable<Reading> {
     this.pressureChangePaPerSec,
     this.nox,
     this.tvoc,
+    this.vocRaw,
+    this.noxRaw,
     required this.sourceFlag,
     this.stationId,
     this.lineId,
@@ -513,6 +563,12 @@ class Reading extends DataClass implements Insertable<Reading> {
     }
     if (!nullToAbsent || tvoc != null) {
       map['tvoc'] = Variable<double>(tvoc);
+    }
+    if (!nullToAbsent || vocRaw != null) {
+      map['voc_raw'] = Variable<int>(vocRaw);
+    }
+    if (!nullToAbsent || noxRaw != null) {
+      map['nox_raw'] = Variable<int>(noxRaw);
     }
     map['source_flag'] = Variable<String>(sourceFlag);
     if (!nullToAbsent || stationId != null) {
@@ -547,6 +603,12 @@ class Reading extends DataClass implements Insertable<Reading> {
           : Value(pressureChangePaPerSec),
       nox: nox == null && nullToAbsent ? const Value.absent() : Value(nox),
       tvoc: tvoc == null && nullToAbsent ? const Value.absent() : Value(tvoc),
+      vocRaw: vocRaw == null && nullToAbsent
+          ? const Value.absent()
+          : Value(vocRaw),
+      noxRaw: noxRaw == null && nullToAbsent
+          ? const Value.absent()
+          : Value(noxRaw),
       sourceFlag: Value(sourceFlag),
       stationId: stationId == null && nullToAbsent
           ? const Value.absent()
@@ -584,6 +646,8 @@ class Reading extends DataClass implements Insertable<Reading> {
       ),
       nox: serializer.fromJson<double?>(json['nox']),
       tvoc: serializer.fromJson<double?>(json['tvoc']),
+      vocRaw: serializer.fromJson<int?>(json['vocRaw']),
+      noxRaw: serializer.fromJson<int?>(json['noxRaw']),
       sourceFlag: serializer.fromJson<String>(json['sourceFlag']),
       stationId: serializer.fromJson<String?>(json['stationId']),
       lineId: serializer.fromJson<String?>(json['lineId']),
@@ -610,6 +674,8 @@ class Reading extends DataClass implements Insertable<Reading> {
       ),
       'nox': serializer.toJson<double?>(nox),
       'tvoc': serializer.toJson<double?>(tvoc),
+      'vocRaw': serializer.toJson<int?>(vocRaw),
+      'noxRaw': serializer.toJson<int?>(noxRaw),
       'sourceFlag': serializer.toJson<String>(sourceFlag),
       'stationId': serializer.toJson<String?>(stationId),
       'lineId': serializer.toJson<String?>(lineId),
@@ -632,6 +698,8 @@ class Reading extends DataClass implements Insertable<Reading> {
     Value<double?> pressureChangePaPerSec = const Value.absent(),
     Value<double?> nox = const Value.absent(),
     Value<double?> tvoc = const Value.absent(),
+    Value<int?> vocRaw = const Value.absent(),
+    Value<int?> noxRaw = const Value.absent(),
     String? sourceFlag,
     Value<String?> stationId = const Value.absent(),
     Value<String?> lineId = const Value.absent(),
@@ -653,6 +721,8 @@ class Reading extends DataClass implements Insertable<Reading> {
         : this.pressureChangePaPerSec,
     nox: nox.present ? nox.value : this.nox,
     tvoc: tvoc.present ? tvoc.value : this.tvoc,
+    vocRaw: vocRaw.present ? vocRaw.value : this.vocRaw,
+    noxRaw: noxRaw.present ? noxRaw.value : this.noxRaw,
     sourceFlag: sourceFlag ?? this.sourceFlag,
     stationId: stationId.present ? stationId.value : this.stationId,
     lineId: lineId.present ? lineId.value : this.lineId,
@@ -680,6 +750,8 @@ class Reading extends DataClass implements Insertable<Reading> {
           : this.pressureChangePaPerSec,
       nox: data.nox.present ? data.nox.value : this.nox,
       tvoc: data.tvoc.present ? data.tvoc.value : this.tvoc,
+      vocRaw: data.vocRaw.present ? data.vocRaw.value : this.vocRaw,
+      noxRaw: data.noxRaw.present ? data.noxRaw.value : this.noxRaw,
       sourceFlag: data.sourceFlag.present
           ? data.sourceFlag.value
           : this.sourceFlag,
@@ -706,6 +778,8 @@ class Reading extends DataClass implements Insertable<Reading> {
           ..write('pressureChangePaPerSec: $pressureChangePaPerSec, ')
           ..write('nox: $nox, ')
           ..write('tvoc: $tvoc, ')
+          ..write('vocRaw: $vocRaw, ')
+          ..write('noxRaw: $noxRaw, ')
           ..write('sourceFlag: $sourceFlag, ')
           ..write('stationId: $stationId, ')
           ..write('lineId: $lineId, ')
@@ -730,6 +804,8 @@ class Reading extends DataClass implements Insertable<Reading> {
     pressureChangePaPerSec,
     nox,
     tvoc,
+    vocRaw,
+    noxRaw,
     sourceFlag,
     stationId,
     lineId,
@@ -753,6 +829,8 @@ class Reading extends DataClass implements Insertable<Reading> {
           other.pressureChangePaPerSec == this.pressureChangePaPerSec &&
           other.nox == this.nox &&
           other.tvoc == this.tvoc &&
+          other.vocRaw == this.vocRaw &&
+          other.noxRaw == this.noxRaw &&
           other.sourceFlag == this.sourceFlag &&
           other.stationId == this.stationId &&
           other.lineId == this.lineId &&
@@ -774,6 +852,8 @@ class ReadingsCompanion extends UpdateCompanion<Reading> {
   final Value<double?> pressureChangePaPerSec;
   final Value<double?> nox;
   final Value<double?> tvoc;
+  final Value<int?> vocRaw;
+  final Value<int?> noxRaw;
   final Value<String> sourceFlag;
   final Value<String?> stationId;
   final Value<String?> lineId;
@@ -793,6 +873,8 @@ class ReadingsCompanion extends UpdateCompanion<Reading> {
     this.pressureChangePaPerSec = const Value.absent(),
     this.nox = const Value.absent(),
     this.tvoc = const Value.absent(),
+    this.vocRaw = const Value.absent(),
+    this.noxRaw = const Value.absent(),
     this.sourceFlag = const Value.absent(),
     this.stationId = const Value.absent(),
     this.lineId = const Value.absent(),
@@ -813,6 +895,8 @@ class ReadingsCompanion extends UpdateCompanion<Reading> {
     this.pressureChangePaPerSec = const Value.absent(),
     this.nox = const Value.absent(),
     this.tvoc = const Value.absent(),
+    this.vocRaw = const Value.absent(),
+    this.noxRaw = const Value.absent(),
     required String sourceFlag,
     this.stationId = const Value.absent(),
     this.lineId = const Value.absent(),
@@ -842,6 +926,8 @@ class ReadingsCompanion extends UpdateCompanion<Reading> {
     Expression<double>? pressureChangePaPerSec,
     Expression<double>? nox,
     Expression<double>? tvoc,
+    Expression<int>? vocRaw,
+    Expression<int>? noxRaw,
     Expression<String>? sourceFlag,
     Expression<String>? stationId,
     Expression<String>? lineId,
@@ -863,6 +949,8 @@ class ReadingsCompanion extends UpdateCompanion<Reading> {
         'pressure_change_pa_per_sec': pressureChangePaPerSec,
       if (nox != null) 'nox': nox,
       if (tvoc != null) 'tvoc': tvoc,
+      if (vocRaw != null) 'voc_raw': vocRaw,
+      if (noxRaw != null) 'nox_raw': noxRaw,
       if (sourceFlag != null) 'source_flag': sourceFlag,
       if (stationId != null) 'station_id': stationId,
       if (lineId != null) 'line_id': lineId,
@@ -885,6 +973,8 @@ class ReadingsCompanion extends UpdateCompanion<Reading> {
     Value<double?>? pressureChangePaPerSec,
     Value<double?>? nox,
     Value<double?>? tvoc,
+    Value<int?>? vocRaw,
+    Value<int?>? noxRaw,
     Value<String>? sourceFlag,
     Value<String?>? stationId,
     Value<String?>? lineId,
@@ -906,6 +996,8 @@ class ReadingsCompanion extends UpdateCompanion<Reading> {
           pressureChangePaPerSec ?? this.pressureChangePaPerSec,
       nox: nox ?? this.nox,
       tvoc: tvoc ?? this.tvoc,
+      vocRaw: vocRaw ?? this.vocRaw,
+      noxRaw: noxRaw ?? this.noxRaw,
       sourceFlag: sourceFlag ?? this.sourceFlag,
       stationId: stationId ?? this.stationId,
       lineId: lineId ?? this.lineId,
@@ -958,6 +1050,12 @@ class ReadingsCompanion extends UpdateCompanion<Reading> {
     if (tvoc.present) {
       map['tvoc'] = Variable<double>(tvoc.value);
     }
+    if (vocRaw.present) {
+      map['voc_raw'] = Variable<int>(vocRaw.value);
+    }
+    if (noxRaw.present) {
+      map['nox_raw'] = Variable<int>(noxRaw.value);
+    }
     if (sourceFlag.present) {
       map['source_flag'] = Variable<String>(sourceFlag.value);
     }
@@ -992,6 +1090,8 @@ class ReadingsCompanion extends UpdateCompanion<Reading> {
           ..write('pressureChangePaPerSec: $pressureChangePaPerSec, ')
           ..write('nox: $nox, ')
           ..write('tvoc: $tvoc, ')
+          ..write('vocRaw: $vocRaw, ')
+          ..write('noxRaw: $noxRaw, ')
           ..write('sourceFlag: $sourceFlag, ')
           ..write('stationId: $stationId, ')
           ..write('lineId: $lineId, ')
@@ -1028,6 +1128,8 @@ typedef $$ReadingsTableCreateCompanionBuilder =
       Value<double?> pressureChangePaPerSec,
       Value<double?> nox,
       Value<double?> tvoc,
+      Value<int?> vocRaw,
+      Value<int?> noxRaw,
       required String sourceFlag,
       Value<String?> stationId,
       Value<String?> lineId,
@@ -1049,6 +1151,8 @@ typedef $$ReadingsTableUpdateCompanionBuilder =
       Value<double?> pressureChangePaPerSec,
       Value<double?> nox,
       Value<double?> tvoc,
+      Value<int?> vocRaw,
+      Value<int?> noxRaw,
       Value<String> sourceFlag,
       Value<String?> stationId,
       Value<String?> lineId,
@@ -1127,6 +1231,16 @@ class $$ReadingsTableFilterComposer
 
   ColumnFilters<double> get tvoc => $composableBuilder(
     column: $table.tvoc,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get vocRaw => $composableBuilder(
+    column: $table.vocRaw,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get noxRaw => $composableBuilder(
+    column: $table.noxRaw,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -1230,6 +1344,16 @@ class $$ReadingsTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<int> get vocRaw => $composableBuilder(
+    column: $table.vocRaw,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get noxRaw => $composableBuilder(
+    column: $table.noxRaw,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<String> get sourceFlag => $composableBuilder(
     column: $table.sourceFlag,
     builder: (column) => ColumnOrderings(column),
@@ -1310,6 +1434,12 @@ class $$ReadingsTableAnnotationComposer
   GeneratedColumn<double> get tvoc =>
       $composableBuilder(column: $table.tvoc, builder: (column) => column);
 
+  GeneratedColumn<int> get vocRaw =>
+      $composableBuilder(column: $table.vocRaw, builder: (column) => column);
+
+  GeneratedColumn<int> get noxRaw =>
+      $composableBuilder(column: $table.noxRaw, builder: (column) => column);
+
   GeneratedColumn<String> get sourceFlag => $composableBuilder(
     column: $table.sourceFlag,
     builder: (column) => column,
@@ -1369,6 +1499,8 @@ class $$ReadingsTableTableManager
                 Value<double?> pressureChangePaPerSec = const Value.absent(),
                 Value<double?> nox = const Value.absent(),
                 Value<double?> tvoc = const Value.absent(),
+                Value<int?> vocRaw = const Value.absent(),
+                Value<int?> noxRaw = const Value.absent(),
                 Value<String> sourceFlag = const Value.absent(),
                 Value<String?> stationId = const Value.absent(),
                 Value<String?> lineId = const Value.absent(),
@@ -1388,6 +1520,8 @@ class $$ReadingsTableTableManager
                 pressureChangePaPerSec: pressureChangePaPerSec,
                 nox: nox,
                 tvoc: tvoc,
+                vocRaw: vocRaw,
+                noxRaw: noxRaw,
                 sourceFlag: sourceFlag,
                 stationId: stationId,
                 lineId: lineId,
@@ -1409,6 +1543,8 @@ class $$ReadingsTableTableManager
                 Value<double?> pressureChangePaPerSec = const Value.absent(),
                 Value<double?> nox = const Value.absent(),
                 Value<double?> tvoc = const Value.absent(),
+                Value<int?> vocRaw = const Value.absent(),
+                Value<int?> noxRaw = const Value.absent(),
                 required String sourceFlag,
                 Value<String?> stationId = const Value.absent(),
                 Value<String?> lineId = const Value.absent(),
@@ -1428,6 +1564,8 @@ class $$ReadingsTableTableManager
                 pressureChangePaPerSec: pressureChangePaPerSec,
                 nox: nox,
                 tvoc: tvoc,
+                vocRaw: vocRaw,
+                noxRaw: noxRaw,
                 sourceFlag: sourceFlag,
                 stationId: stationId,
                 lineId: lineId,

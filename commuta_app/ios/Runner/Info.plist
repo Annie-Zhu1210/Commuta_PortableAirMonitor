@@ -8,6 +8,10 @@
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Commuta uses your location to map where air-quality readings are collected.</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Commuta uses Bluetooth to connect to your air quality sensor and receive measurements during your commute.</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>Commuta uses Bluetooth to connect to your air quality sensor and receive measurements during your commute.</string>
 	<key>GMSApiKey</key>
 	<string>$(MAPS_API_KEY)</string>
 	<key>CFBundleDisplayName</key>

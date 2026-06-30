@@ -57,3 +57,6 @@ android/secrets.properties
 ios/Flutter/Secrets.xcconfig
 ios/Flutter/Secrets-Debug.xcconfig
 ios/Flutter/Secrets-Release.xcconfig
+
+# BLE UUIDs
+lib/core/constants/ble_uuids.dart

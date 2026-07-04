@@ -2,8 +2,8 @@ import '../models/air_quality_reading.dart';
 
 /// Abstract interface for all air quality data sources.
 /// The rest of the app talks only to this interface — never to a
-/// concrete implementation directly. This means swapping MockDataSource
-/// for BLEDataSource later requires no changes outside this file's consumers.
+/// concrete implementation directly. This means swapping MockManager
+/// for BLEManager later requires no changes outside this file's consumers.
 abstract class AirQualityDataSource {
   /// Stream of live readings as they arrive (every ~10 seconds).
   Stream<AirQualityReading> subscribeToLiveReadings();

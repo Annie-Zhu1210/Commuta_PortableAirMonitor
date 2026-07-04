@@ -15,7 +15,8 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  // Swap MockDataSource for BLEDataSource here when BLE is ready
+  // The single mock/live swap lives in AppServices.init() — Home just
+  // reads whichever manager is active.
   final AirQualityDataSource _dataSource = AppServices.instance.dataSource;
 
   AirQualityReading? _latestReading;

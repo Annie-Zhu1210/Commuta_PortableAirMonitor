@@ -9,36 +9,136 @@ import '../../core/constants/ble_uuids.dart';
 import '../../services/device_connection.dart';
 import '../models/air_quality_reading.dart';
 import 'air_quality_datasource.dart';
+import 'ble_packet_parser.dart';
+
+// ── Buffered sync progress (dev-only surface) ────────────────────────────
+
+/// Life-cycle phase of a buffered catch-up sync attempt.
+///
+/// Deliberately just two states: `active` while records are flowing,
+/// `completed` for every terminal outcome (success, skipped, timed
+/// out). Detail lives in the other fields of [BufferedSyncProgress] —
+/// [BufferedSyncProgress.sentCount] and the reconciliation seqs on
+/// success, or [BufferedSyncProgress.note] on a skip or timeout.
+enum BufferedSyncPhase { active, completed }
+
+/// Snapshot of buffered-sync state, published on
+/// [BLEManager.bufferedSyncProgressListenable] for the dev harness.
+///
+/// Not part of the [DeviceConnection] interface — production UI reads
+/// the coarser [DeviceConnection.stateStream] (`syncingBuffered` vs
+/// `connected`) and doesn't need this level of detail. Kept public so
+/// the harness screen (which imports `BLEManager` directly) can render
+/// a diagnostic panel without additional plumbing.
+class BufferedSyncProgress {
+  const BufferedSyncProgress({
+    required this.phase,
+    required this.startedAt,
+    required this.recordsReceived,
+    this.expectedTotal,
+    this.completedAt,
+    this.sentCount,
+    this.firstSentSeq,
+    this.lastSentSeq,
+    this.requestedStartSeq,
+    this.requestedEndSeq,
+    this.note,
+  });
+
+  final BufferedSyncPhase phase;
+  final DateTime startedAt;
+  final DateTime? completedAt;
+
+  /// Records received on the Buffered stream since [startedAt].
+  final int recordsReceived;
+
+  /// Best guess at the total records to be sent, computed at sync
+  /// start as `newestBufferedSeq − ourHighestSeq`. Approximate — the
+  /// device may clamp the range, and buffered records don't
+  /// necessarily occupy every integer sequence value.
+  final int? expectedTotal;
+
+  /// `sent_count` field of the EOS frame. Populated on successful
+  /// [BufferedSyncPhase.completed]; null on active or on skip/timeout.
+  final int? sentCount;
+  final int? firstSentSeq;
+  final int? lastSentSeq;
+
+  /// Range as requested by the phone in the sync-request write.
+  final int? requestedStartSeq;
+  final int? requestedEndSeq;
+
+  /// Diagnostic message. Set for skipped syncs (e.g. "already caught
+  /// up", "firmware sequence reset detected") and for the heartbeat
+  /// timeout path. Null on active and on clean success.
+  final String? note;
+}
 
 /// Real BLE implementation of [AirQualityDataSource] and [DeviceConnection].
 ///
-/// See BLE_Integration_Plan.md for the full context. Step 4
-/// responsibilities: scan, connect, characteristic discovery, notify
-/// subscriptions, MTU 247 (Android), SharedPreferences persistence,
-/// silent auto-reconnect, forget. Parsing lands in Step 5.
+/// See BLE_Integration_Plan.md for the full context. Step 6 adds the
+/// catch-up sync protocol: on `connected`, once both a first Live
+/// packet (anchor set) and a first Status packet (`newest_buffered_seq`
+/// known) have landed, the manager decides whether to request the
+/// device's flash buffer. Records arriving on the Buffered
+/// characteristic are time-stamped by projecting backwards from the
+/// most recent live-arrival anchor and emitted on the buffered-only
+/// stream so UI surfaces showing "current reading" are not disturbed.
 class BLEManager implements AirQualityDataSource, DeviceConnection {
   static const String _prefsKey = 'commuta_paired_peripheral_id';
 
-  static const Duration _scanTimeout                = Duration(seconds: 10);
-  static const Duration _connectTimeout             = Duration(seconds: 15);
-  static const Duration _autoReconnectTimeout       = Duration(seconds: 10);
-  static const Duration _autoReconnectScanTimeout   = Duration(seconds: 12);
+  static const Duration _scanTimeout = Duration(seconds: 10);
+  static const Duration _connectTimeout = Duration(seconds: 15);
+  static const Duration _autoReconnectTimeout = Duration(seconds: 10);
+  static const Duration _autoReconnectScanTimeout = Duration(seconds: 12);
   static const int _targetMtu = 247;
+
+  /// Device sample cadence (matches the firmware). Used to convert
+  /// hPa deltas into Pa/s for `pressureChangePaPerSec` and to project
+  /// buffered timestamps back from the live anchor.
+  static const double _samplingIntervalSec = 10.0;
+  static const int _samplingIntervalSecInt = 10;
+
+  /// Sentinel written for `end_seq` in a sync request meaning "to
+  /// newest available". Matches the firmware's interpretation in
+  /// `firmware/ble.h`.
+  static const int _syncEndSeqSentinel = 0xFFFFFFFF;
+
+  /// Silence tolerance during a buffered sync. If no Buffered frame
+  /// arrives for this long, the manager gives up on the current sync
+  /// attempt, transitions back to `connected`, and marks sync done
+  /// for the session so it doesn't retry until the next reconnect.
+  static const Duration _syncHeartbeatTimeout = Duration(seconds: 30);
 
   bool _started = false;
   DeviceConnectionState _currentState = DeviceConnectionState.idle;
-  final _stateController =
-      StreamController<DeviceConnectionState>.broadcast();
+  final _stateController = StreamController<DeviceConnectionState>.broadcast();
 
   final ValueNotifier<bool> _pairingComplete = ValueNotifier<bool>(false);
-  final ValueNotifier<DateTime?> _lastSeenNotifier =
-      ValueNotifier<DateTime?>(null);
+  final ValueNotifier<DateTime?> _lastSeenNotifier = ValueNotifier<DateTime?>(
+    null,
+  );
   bool _shuttingDownReceived = false;
 
   int? _batteryPercent;
   int? _bufferedCount;
   AirQualityReading? _latestReading;
   DeviceStatus? _latestStatus;
+
+  /// Previous Live-packet pressure in hPa, used to compute
+  /// `pressureChangePaPerSec` on the following sample. Nulled on
+  /// teardown so the first sample of each fresh (re)connect emits
+  /// `pressureChangePaPerSec = null`, per the plan.
+  double? _previousPressure;
+
+  /// Most recent (sequence, wall-clock) pair for a Live packet.
+  /// Updated on every valid Live notification. Step 6 reads this
+  /// fresh at back-fill time (Decision 8A) to time-stamp each
+  /// buffered record:
+  ///   buffered_ts = anchor.arrival − (anchor.seq − buffered.seq) × 10 s
+  /// Nulled on teardown so a stale anchor from a previous connection
+  /// cannot be applied to a fresh sync.
+  ({int seq, DateTime arrival})? _liveArrivalAnchor;
 
   String? _persistedIdentifier;
 
@@ -49,8 +149,9 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
 
   final _liveReadingsController =
       StreamController<AirQualityReading>.broadcast();
-  final _statusController =
-      StreamController<DeviceStatus>.broadcast();
+  final _bufferedReadingsController =
+      StreamController<AirQualityReading>.broadcast();
+  final _statusController = StreamController<DeviceStatus>.broadcast();
   final _scanResultsController =
       StreamController<List<DiscoveredDevice>>.broadcast();
 
@@ -58,6 +159,49 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
   StreamSubscription<BluetoothConnectionState>? _connectionStateSubscription;
   StreamSubscription<List<int>>? _liveNotificationSubscription;
   StreamSubscription<List<int>>? _statusNotificationSubscription;
+  StreamSubscription<List<int>>? _bufferedNotificationSubscription;
+
+  // ── Sync state (all cleared in _teardownConnection) ────────────────────
+
+  /// Provides the largest `sequenceNumber` currently in the readings
+  /// DB (or null if empty). Wired in by `AppServices` in Step 7 as
+  /// `bleManager.highestSequenceProvider = repo.getHighestSequenceNumber`.
+  /// If left null (e.g. the dev harness didn't wire it), sync is
+  /// skipped with a diagnostic log and the connection continues to
+  /// deliver Live readings normally.
+  Future<int?> Function()? highestSequenceProvider;
+
+  /// True once the first Live notification of the current connection
+  /// has arrived. Together with [_firstStatusReceived] this gates the
+  /// sync-decision step.
+  bool _firstLiveReceived = false;
+  bool _firstStatusReceived = false;
+
+  /// Latches once [_maybeStartSync] has run so its DB query and
+  /// request write happen at most once per connection.
+  bool _syncEvaluated = false;
+
+  /// True once EOS has been received (or a terminal skip / timeout
+  /// occurred). Prevents any re-evaluation within the same session.
+  /// Cleared in `_teardownConnection` so a fresh reconnect syncs again.
+  bool _syncCompletedThisSession = false;
+
+  /// Range last written to the Buffered characteristic. Kept for
+  /// EOS reconciliation logging.
+  ({int start, int end})? _lastRequestedRange;
+
+  /// Records received on the Buffered stream since sync began, used
+  /// to populate [BufferedSyncProgress.recordsReceived].
+  int _recordsReceivedThisSync = 0;
+
+  /// Watchdog: cancelled and re-armed on every Buffered notification.
+  /// Fires only after [_syncHeartbeatTimeout] of silence.
+  Timer? _syncHeartbeatTimer;
+
+  /// Progress snapshot for the dev harness. Kept after sync ends so
+  /// the harness can render "last sync" details until the next attempt.
+  final ValueNotifier<BufferedSyncProgress?> _syncProgressNotifier =
+      ValueNotifier<BufferedSyncProgress?>(null);
 
   // ── DeviceConnection: read-only surfaces ───────────────────────────────
 
@@ -95,11 +239,21 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
   Stream<List<DiscoveredDevice>> get scanResults =>
       _scanResultsController.stream;
 
+  /// Diagnostic sync-progress notifier consumed by the dev harness.
+  /// Not on the [DeviceConnection] interface — production UI uses the
+  /// coarser [stateStream] instead.
+  ValueListenable<BufferedSyncProgress?> get bufferedSyncProgressListenable =>
+      _syncProgressNotifier;
+
   // ── AirQualityDataSource surfaces ──────────────────────────────────────
 
   @override
   Stream<AirQualityReading> subscribeToLiveReadings() =>
       _liveReadingsController.stream;
+
+  @override
+  Stream<AirQualityReading> subscribeToBufferedReadings() =>
+      _bufferedReadingsController.stream;
 
   @override
   Future<List<AirQualityReading>> getHistoricalReadings({
@@ -262,8 +416,8 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
                 name: r.device.platformName.isNotEmpty
                     ? r.device.platformName
                     : (r.advertisementData.advName.isNotEmpty
-                        ? r.advertisementData.advName
-                        : 'Unknown'),
+                          ? r.advertisementData.advName
+                          : 'Unknown'),
                 rssi: r.rssi,
               ),
             )
@@ -350,15 +504,13 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
     _connectedDevice = device;
 
     await _connectionStateSubscription?.cancel();
-    _connectionStateSubscription = device.connectionState.listen(
-      (state) {
-        if (state == BluetoothConnectionState.disconnected) {
-          debugPrint('[BLEManager] Peer initiated disconnect.');
-          unawaited(_teardownConnection());
-          _transitionTo(DeviceConnectionState.disconnected);
-        }
-      },
-    );
+    _connectionStateSubscription = device.connectionState.listen((state) {
+      if (state == BluetoothConnectionState.disconnected) {
+        debugPrint('[BLEManager] Peer initiated disconnect.');
+        unawaited(_teardownConnection());
+        _transitionTo(DeviceConnectionState.disconnected);
+      }
+    });
 
     if (Platform.isAndroid) {
       try {
@@ -409,33 +561,475 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
     }
 
     await _liveCharacteristic!.setNotifyValue(true);
-    _liveNotificationSubscription =
-        _liveCharacteristic!.lastValueStream.listen(_onLivePacket);
+    _liveNotificationSubscription = _liveCharacteristic!.lastValueStream.listen(
+      _onLivePacket,
+    );
 
     await _statusCharacteristic!.setNotifyValue(true);
-    _statusNotificationSubscription =
-        _statusCharacteristic!.lastValueStream.listen(_onStatusPacket);
+    _statusNotificationSubscription = _statusCharacteristic!.lastValueStream
+        .listen(_onStatusPacket);
+
+    // Buffered characteristic subscription — must be enabled before
+    // any sync request is written, otherwise the device's data / EOS
+    // frames vanish into the void.
+    await _bufferedCharacteristic!.setNotifyValue(true);
+    _bufferedNotificationSubscription = _bufferedCharacteristic!.lastValueStream
+        .listen(_onBufferedPacket);
 
     _transitionTo(DeviceConnectionState.connected);
   }
+
+  // ── Notification handlers ──────────────────────────────────────────────
 
   void _onLivePacket(List<int> bytes) {
     // `lastValueStream` emits an empty list on first subscribe, before
     // any real notification. Ignore those — they're not real packets.
     if (bytes.isEmpty) return;
-    _lastSeenNotifier.value = DateTime.now();
-    debugPrint(
-      '[BLEManager] Live packet: ${bytes.length} bytes '
-      '(parsing lands in Step 5).',
+
+    final packet = BlePacketParser.parseLivePacket(bytes);
+    if (packet == null) {
+      debugPrint(
+        '[BLEManager] Live packet: unexpected length '
+        '${bytes.length} B (expected ${BlePacketParser.liveLength}); '
+        'skipping.',
+      );
+      return;
+    }
+
+    final now = DateTime.now();
+    _lastSeenNotifier.value = now;
+
+    // Pressure change: |current − previous| in Pa/s. Device reports
+    // hPa; ×100 → Pa; ÷10 s → per-second. First sample after a fresh
+    // connection has no previous → null.
+    double? pressureChangePaPerSec;
+    if (_previousPressure != null) {
+      final deltaHpa = (packet.pressure - _previousPressure!).abs();
+      pressureChangePaPerSec = (deltaHpa * 100.0) / _samplingIntervalSec;
+    }
+    _previousPressure = packet.pressure;
+
+    // Conditioning nulls only the processed indices (Option B): the
+    // raw SGP41 ticks are diagnostically useful even during warm-up
+    // and are preserved for the dissertation's JSON export.
+    final reading = AirQualityReading(
+      timestamp: now,
+      pm1: packet.pm1,
+      pm25: packet.pm25,
+      pm10: packet.pm10,
+      co2: packet.co2.toDouble(),
+      temperature: packet.temperature,
+      humidity: packet.humidity,
+      pressure: packet.pressure,
+      pressureChangePaPerSec: pressureChangePaPerSec,
+      tvoc: packet.conditioning ? null : packet.vocIndex.toDouble(),
+      nox: packet.conditioning ? null : packet.noxIndex.toDouble(),
+      vocRaw: packet.srawVoc,
+      noxRaw: packet.srawNox,
+      sourceFlag: 'live',
+      sequenceNumber: packet.sequence,
     );
+
+    _latestReading = reading;
+    _liveArrivalAnchor = (seq: packet.sequence, arrival: now);
+
+    if (!_liveReadingsController.isClosed) {
+      _liveReadingsController.add(reading);
+    }
+
+    debugPrint(
+      '[BLEManager] Live #${packet.sequence} '
+      'pm2.5=${packet.pm25.toStringAsFixed(1)} '
+      'co2=${packet.co2} '
+      'batt=${packet.batteryPercent}%'
+      '${packet.conditioning ? ' cond' : ''}',
+    );
+
+    // Gate for the buffered sync-decision step: both a first Live and
+    // a first Status must have arrived (Decision 2A). Fire-and-forget
+    // — DB query and sync-request write happen async.
+    if (!_firstLiveReceived) {
+      _firstLiveReceived = true;
+      unawaited(_maybeStartSync());
+    }
   }
 
   void _onStatusPacket(List<int> bytes) {
     if (bytes.isEmpty) return;
-    _lastSeenNotifier.value = DateTime.now();
+
+    final now = DateTime.now();
+    final status = BlePacketParser.parseStatusPacket(bytes, now);
+    if (status == null) {
+      debugPrint(
+        '[BLEManager] Status packet: unexpected length '
+        '${bytes.length} B (expected ${BlePacketParser.statusLength}); '
+        'skipping.',
+      );
+      return;
+    }
+
+    _lastSeenNotifier.value = now;
+    _latestStatus = status;
+    _batteryPercent = status.batteryPercent;
+    _bufferedCount = status.bufferedCount;
+
+    // SHUTTING_DOWN is a one-way latch: once observed, we keep the
+    // flag set for the rest of the session so shutdown UI (Step 7)
+    // doesn't flicker if a stray subsequent Status arrives before the
+    // device actually powers off.
+    if (status.shuttingDown) {
+      _shuttingDownReceived = true;
+    }
+
+    if (!_statusController.isClosed) {
+      _statusController.add(status);
+    }
+
     debugPrint(
-      '[BLEManager] Status packet: ${bytes.length} bytes '
-      '(parsing lands in Step 5).',
+      '[BLEManager] Status uptime=${status.uptimeSeconds}s '
+      'buffered=${status.bufferedCount} '
+      'batt=${status.batteryPercent}%'
+      '${status.conditioning ? ' cond' : ''}'
+      '${status.shuttingDown ? ' SHUTDOWN' : ''}',
+    );
+
+    if (!_firstStatusReceived) {
+      _firstStatusReceived = true;
+      unawaited(_maybeStartSync());
+    }
+  }
+
+  // ── Buffered sync ──────────────────────────────────────────────────────
+
+  /// Called from both Live and Status handlers once the corresponding
+  /// "first" flag has flipped. Guarded by [_syncEvaluated] so at most
+  /// one decision runs per connection.
+  Future<void> _maybeStartSync() async {
+    if (_syncEvaluated) return;
+    if (!_firstLiveReceived || !_firstStatusReceived) return;
+    _syncEvaluated = true;
+
+    final status = _latestStatus;
+    if (status == null) {
+      debugPrint(
+        '[BLEManager] Sync: no Status snapshot cached at decision '
+        'time; giving up (should be unreachable).',
+      );
+      return;
+    }
+
+    // Skip: device has nothing buffered.
+    if (status.bufferedCount == 0) {
+      debugPrint(
+        '[BLEManager] Sync: device reports zero buffered samples; '
+        'nothing to do.',
+      );
+      _publishSkipped(note: 'Device has no buffered samples');
+      _syncCompletedThisSession = true;
+      return;
+    }
+
+    // Skip: no provider wired (dev harness path). Real app wires this
+    // in Step 7 via AppServices.
+    if (highestSequenceProvider == null) {
+      debugPrint(
+        '[BLEManager] Sync: highestSequenceProvider not wired; '
+        'skipping sync. Wire it via `bleManager.highestSequenceProvider = '
+        'repo.getHighestSequenceNumber` in AppServices, or set it on '
+        'the harness before connecting to exercise sync.',
+      );
+      _publishSkipped(note: 'highestSequenceProvider not wired');
+      _syncCompletedThisSession = true;
+      return;
+    }
+
+    int? ourHighest;
+    try {
+      ourHighest = await highestSequenceProvider!();
+    } catch (e) {
+      debugPrint(
+        '[BLEManager] Sync: highestSequenceProvider threw ($e); '
+        'skipping sync for this session.',
+      );
+      _publishSkipped(note: 'highestSequenceProvider threw: $e');
+      _syncCompletedThisSession = true;
+      return;
+    }
+
+    // Skip: already caught up.
+    if (ourHighest != null && ourHighest >= status.newestBufferedSeq) {
+      if (ourHighest == status.newestBufferedSeq) {
+        debugPrint(
+          '[BLEManager] Sync: already caught up '
+          '(ourHighest=$ourHighest == device newest_buffered_seq).',
+        );
+        _publishSkipped(note: 'Already caught up (ourHighest = device newest)');
+      } else {
+        // ourHighest > newestBufferedSeq — firmware sequence reset
+        // (Decision 4A). Two "eras" of sequence numbers coexist in
+        // the DB, separated by timestamps; skip sync rather than
+        // attempt a full-range refetch.
+        debugPrint(
+          '[BLEManager] Sync: firmware sequence reset detected '
+          '(device newest_buffered_seq=${status.newestBufferedSeq} < '
+          'our highest=$ourHighest). Skipping sync (Decision 4A). '
+          'New readings will flow via Live notifications; any records '
+          'the device buffered before we reconnected are not being '
+          'requested. If the buffer contains genuinely new data with '
+          'reset sequence numbers, wipe the DB via the dev-only Clear '
+          'action to recover them on next connect.',
+        );
+        _publishSkipped(note: 'Firmware sequence reset detected');
+      }
+      _syncCompletedThisSession = true;
+      return;
+    }
+
+    // Request the range. Empty DB → start at 0 to include a possible
+    // seq-0 record; otherwise start immediately after our highest.
+    final startSeq = (ourHighest == null) ? 0 : ourHighest + 1;
+    const endSeq = _syncEndSeqSentinel;
+    final expectedTotal = status.newestBufferedSeq - startSeq + 1;
+
+    _lastRequestedRange = (start: startSeq, end: endSeq);
+    _recordsReceivedThisSync = 0;
+
+    _syncProgressNotifier.value = BufferedSyncProgress(
+      phase: BufferedSyncPhase.active,
+      startedAt: DateTime.now(),
+      recordsReceived: 0,
+      expectedTotal: expectedTotal > 0 ? expectedTotal : null,
+      requestedStartSeq: startSeq,
+      requestedEndSeq: endSeq,
+    );
+
+    _transitionTo(DeviceConnectionState.syncingBuffered);
+    _armSyncHeartbeat();
+
+    debugPrint(
+      '[BLEManager] Sync: requesting [$startSeq..0x${endSeq.toRadixString(16)}] '
+      '(ourHighest=$ourHighest, device newest=${status.newestBufferedSeq}, '
+      'expected ~$expectedTotal records).',
+    );
+
+    try {
+      final payload = BlePacketParser.encodeSyncRequest(startSeq, endSeq);
+      await _bufferedCharacteristic!.write(payload, withoutResponse: false);
+    } catch (e) {
+      debugPrint(
+        '[BLEManager] Sync: request write failed ($e); giving up for '
+        'this session.',
+      );
+      _syncHeartbeatTimer?.cancel();
+      _syncHeartbeatTimer = null;
+      _publishTerminatedWithNote('Sync-request write failed: $e');
+      _syncCompletedThisSession = true;
+      _transitionTo(DeviceConnectionState.connected);
+    }
+  }
+
+  void _onBufferedPacket(List<int> bytes) {
+    // `lastValueStream` emits [] on first subscribe. Ignore.
+    if (bytes.isEmpty) return;
+
+    if (_currentState != DeviceConnectionState.syncingBuffered) {
+      debugPrint(
+        '[BLEManager] Buffered frame arrived while not syncing '
+        '(state=$_currentState, ${bytes.length} B); ignoring.',
+      );
+      return;
+    }
+
+    final frame = BlePacketParser.classifyBufferedFrame(bytes);
+    if (frame == null) {
+      debugPrint(
+        '[BLEManager] Buffered frame: malformed '
+        '(${bytes.length} B, first byte '
+        '0x${bytes.isNotEmpty ? bytes[0].toRadixString(16) : "??"}); '
+        'dropping. Heartbeat still armed — waiting for a valid frame.',
+      );
+      return;
+    }
+
+    // Any valid frame (data or EOS) is a heartbeat.
+    _armSyncHeartbeat();
+
+    switch (frame) {
+      case BufferedDataFrame(:final records):
+        _handleBufferedDataFrame(records);
+      case BufferedEosFrame(
+        :final firstSentSeq,
+        :final lastSentSeq,
+        :final sentCount,
+      ):
+        _handleBufferedEosFrame(
+          firstSentSeq: firstSentSeq,
+          lastSentSeq: lastSentSeq,
+          sentCount: sentCount,
+        );
+    }
+  }
+
+  void _handleBufferedDataFrame(List<LivePacket> records) {
+    for (final packet in records) {
+      final timestamp = _computeBackfillTimestamp(packet.sequence);
+      if (timestamp == null) {
+        // Should be unreachable — sync only starts after the first
+        // Live packet, so _liveArrivalAnchor is always populated by
+        // the time buffered frames arrive.
+        debugPrint(
+          '[BLEManager] Buffered record #${packet.sequence}: no live '
+          'anchor available for back-fill; dropping record.',
+        );
+        continue;
+      }
+
+      final reading = AirQualityReading(
+        timestamp: timestamp,
+        pm1: packet.pm1,
+        pm25: packet.pm25,
+        pm10: packet.pm10,
+        co2: packet.co2.toDouble(),
+        temperature: packet.temperature,
+        humidity: packet.humidity,
+        pressure: packet.pressure,
+        // Pressure-change is a live-only concept — we don't back-fill
+        // it for buffered records because doing so would require the
+        // previous buffered record in the same run, which may or may
+        // not be present in the DB. Leaving it null is honest.
+        pressureChangePaPerSec: null,
+        tvoc: packet.conditioning ? null : packet.vocIndex.toDouble(),
+        nox: packet.conditioning ? null : packet.noxIndex.toDouble(),
+        vocRaw: packet.srawVoc,
+        noxRaw: packet.srawNox,
+        sourceFlag: 'buffered',
+        sequenceNumber: packet.sequence,
+      );
+
+      if (!_bufferedReadingsController.isClosed) {
+        _bufferedReadingsController.add(reading);
+      }
+      _recordsReceivedThisSync++;
+    }
+
+    // Publish progress. `expectedTotal` is carried forward from the
+    // active snapshot — set at sync start, never re-estimated.
+    final prev = _syncProgressNotifier.value;
+    _syncProgressNotifier.value = BufferedSyncProgress(
+      phase: BufferedSyncPhase.active,
+      startedAt: prev?.startedAt ?? DateTime.now(),
+      recordsReceived: _recordsReceivedThisSync,
+      expectedTotal: prev?.expectedTotal,
+      requestedStartSeq: prev?.requestedStartSeq,
+      requestedEndSeq: prev?.requestedEndSeq,
+    );
+
+    debugPrint(
+      '[BLEManager] Buffered data frame: ${records.length} record(s) '
+      '(seq ${records.first.sequence}..${records.last.sequence}); '
+      'total this sync: $_recordsReceivedThisSync.',
+    );
+  }
+
+  void _handleBufferedEosFrame({
+    required int firstSentSeq,
+    required int lastSentSeq,
+    required int sentCount,
+  }) {
+    final requested = _lastRequestedRange;
+    debugPrint(
+      '[BLEManager] Buffered sync complete. '
+      'Requested=${requested == null ? "n/a" : "[${requested.start}..0x${requested.end.toRadixString(16)}]"}. '
+      'Device sent: first_sent=$firstSentSeq, last_sent=$lastSentSeq, '
+      'sent_count=$sentCount. Records received on stream: '
+      '$_recordsReceivedThisSync.',
+    );
+
+    if (sentCount != _recordsReceivedThisSync) {
+      debugPrint(
+        '[BLEManager] Buffered sync: reconciliation mismatch — device '
+        'reports $sentCount records, we counted '
+        '$_recordsReceivedThisSync. Difference is usually zero on iOS; '
+        'a non-zero delta suggests notification loss (rare) or a '
+        'malformed frame that was dropped upstream.',
+      );
+    }
+
+    _syncHeartbeatTimer?.cancel();
+    _syncHeartbeatTimer = null;
+
+    _bufferedCount = 0;
+    _syncCompletedThisSession = true;
+
+    final prev = _syncProgressNotifier.value;
+    _syncProgressNotifier.value = BufferedSyncProgress(
+      phase: BufferedSyncPhase.completed,
+      startedAt: prev?.startedAt ?? DateTime.now(),
+      completedAt: DateTime.now(),
+      recordsReceived: _recordsReceivedThisSync,
+      expectedTotal: prev?.expectedTotal,
+      sentCount: sentCount,
+      firstSentSeq: sentCount > 0 ? firstSentSeq : null,
+      lastSentSeq: sentCount > 0 ? lastSentSeq : null,
+      requestedStartSeq: prev?.requestedStartSeq,
+      requestedEndSeq: prev?.requestedEndSeq,
+    );
+
+    _transitionTo(DeviceConnectionState.connected);
+  }
+
+  /// Reads the current live anchor and projects a wall-clock time for
+  /// [recordSeq]. Applies the formula symmetrically (Decision 8A) —
+  /// if a buffered record ever has a seq greater than the anchor's
+  /// (shouldn't happen in normal operation), the formula projects
+  /// forward without special-casing.
+  DateTime? _computeBackfillTimestamp(int recordSeq) {
+    final anchor = _liveArrivalAnchor;
+    if (anchor == null) return null;
+    final deltaSeconds = (anchor.seq - recordSeq) * _samplingIntervalSecInt;
+    return anchor.arrival.subtract(Duration(seconds: deltaSeconds));
+  }
+
+  void _armSyncHeartbeat() {
+    _syncHeartbeatTimer?.cancel();
+    _syncHeartbeatTimer = Timer(_syncHeartbeatTimeout, _onSyncHeartbeatFired);
+  }
+
+  void _onSyncHeartbeatFired() {
+    if (_currentState != DeviceConnectionState.syncingBuffered) return;
+    debugPrint(
+      '[BLEManager] Buffered sync heartbeat: no frame in '
+      '${_syncHeartbeatTimeout.inSeconds} s. Aborting sync for this '
+      'session; connection remains live.',
+    );
+    _syncCompletedThisSession = true;
+    _publishTerminatedWithNote(
+      'Timeout: no buffered frame for ${_syncHeartbeatTimeout.inSeconds} s',
+    );
+    _transitionTo(DeviceConnectionState.connected);
+  }
+
+  void _publishSkipped({required String note}) {
+    _syncProgressNotifier.value = BufferedSyncProgress(
+      phase: BufferedSyncPhase.completed,
+      startedAt: DateTime.now(),
+      completedAt: DateTime.now(),
+      recordsReceived: 0,
+      note: note,
+    );
+  }
+
+  void _publishTerminatedWithNote(String note) {
+    final prev = _syncProgressNotifier.value;
+    _syncProgressNotifier.value = BufferedSyncProgress(
+      phase: BufferedSyncPhase.completed,
+      startedAt: prev?.startedAt ?? DateTime.now(),
+      completedAt: DateTime.now(),
+      recordsReceived: _recordsReceivedThisSync,
+      expectedTotal: prev?.expectedTotal,
+      requestedStartSeq: prev?.requestedStartSeq,
+      requestedEndSeq: prev?.requestedEndSeq,
+      note: note,
     );
   }
 
@@ -454,7 +1048,10 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
     _bufferedCount = null;
     _lastSeenNotifier.value = null;
     _latestStatus = null;
+    _latestReading = null;
     _shuttingDownReceived = false;
+    // Leave _syncProgressNotifier alone — the harness may want to
+    // inspect the last sync details even after forget.
 
     _transitionTo(DeviceConnectionState.idle);
   }
@@ -466,12 +1063,33 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
     _liveNotificationSubscription = null;
     await _statusNotificationSubscription?.cancel();
     _statusNotificationSubscription = null;
+    await _bufferedNotificationSubscription?.cancel();
+    _bufferedNotificationSubscription = null;
     await _connectionStateSubscription?.cancel();
     _connectionStateSubscription = null;
 
     _liveCharacteristic = null;
     _statusCharacteristic = null;
     _bufferedCharacteristic = null;
+
+    _syncHeartbeatTimer?.cancel();
+    _syncHeartbeatTimer = null;
+
+    // Reset per-connection state so the next (re)connect starts
+    // fresh. Nulling `_previousPressure` guarantees the first Live
+    // sample after the next connect emits `pressureChangePaPerSec =
+    // null` as the plan requires. `_liveArrivalAnchor` is nulled so
+    // buffered back-fill cannot reference a stale anchor across
+    // connection lifetimes. Sync flags reset so a reconnect
+    // re-evaluates whether sync is needed.
+    _previousPressure = null;
+    _liveArrivalAnchor = null;
+    _firstLiveReceived = false;
+    _firstStatusReceived = false;
+    _syncEvaluated = false;
+    _syncCompletedThisSession = false;
+    _lastRequestedRange = null;
+    _recordsReceivedThisSync = 0;
 
     final device = _connectedDevice;
     _connectedDevice = null;
@@ -490,10 +1108,12 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
     unawaited(_teardownConnection());
     _stateController.close();
     _liveReadingsController.close();
+    _bufferedReadingsController.close();
     _statusController.close();
     _scanResultsController.close();
     _pairingComplete.dispose();
     _lastSeenNotifier.dispose();
+    _syncProgressNotifier.dispose();
   }
 
   // ── Internal ───────────────────────────────────────────────────────────

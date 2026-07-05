@@ -177,6 +177,7 @@ uint8_t readBatteryPercent() {
   int pct = (int)((vbat - 3.3f) / (4.2f - 3.3f) * 100.0f);
   if (pct < 0) pct = 0;
   if (pct > 100) pct = 100;
+  Serial.printf("Battery: raw=%d vbat=%.2fV pct=%d\n", raw, vbat, pct);
   return (uint8_t)pct;
 }
 

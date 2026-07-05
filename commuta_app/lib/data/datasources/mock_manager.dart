@@ -81,13 +81,22 @@ class MockManager implements AirQualityDataSource, DeviceConnection {
       humidity:               double.parse(_hum.toStringAsFixed(1)),
       pressure:               double.parse(_pres.toStringAsFixed(1)),
       pressureChangePaPerSec: pressureChangePaPerSec,
-      nox:                    null, // SGP41 modelled as unavailable in the mock
+      // SGP41 modelled as unavailable in the mock — no processed
+      // indices, no raw ticks. Everything nullable stays null.
       tvoc:                   null,
+      nox:                    null,
+      vocRaw:                 null,
+      noxRaw:                 null,
       sourceFlag:             'mock',
       sequenceNumber:         _sequence,
     );
   }
 
+  @override
+  Stream<AirQualityReading> subscribeToBufferedReadings() =>
+      const Stream<AirQualityReading>.empty();
+
+      
   @override
   Stream<AirQualityReading> subscribeToLiveReadings() {
     _readingController ??= StreamController<AirQualityReading>.broadcast();
@@ -273,7 +282,6 @@ class MockManager implements AirQualityDataSource, DeviceConnection {
     _statusController = null;
     _scanController?.close();
     _scanController = null;
-    _pairingComplete.dispose();
     _pairingComplete.dispose();
     _lastSeenNotifier.dispose();
   }

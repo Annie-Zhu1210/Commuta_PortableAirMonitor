@@ -8,11 +8,11 @@ import 'tfl_map_data.dart';
 
 /// Process-wide service holder.
 ///
-/// Holds the shared [AirQualityDataSource], the [DeviceConnection]
-/// (same underlying instance as [dataSource]), the [AppDatabase], the
-/// [ReadingsRepository], and the [StationClassificationService], so
-/// every screen reads from the same instances and every reading lands
-/// in one durable store. Initialised once in `main()` before `runApp`.
+/// Holds the shared [AirQualityDataSource], the sibling
+/// [DeviceConnection], the [AppDatabase], the [ReadingsRepository], and
+/// the [StationClassificationService], so every screen reads from the
+/// same instances and every reading lands in one durable store.
+/// Initialised once in `main()` before `runApp`.
 ///
 /// Pattern mirrors [TflMapData.instance].
 class AppServices {
@@ -21,22 +21,18 @@ class AppServices {
 
   bool _initialised = false;
 
-  /// The shared air-quality data source. Points at the same instance
-  /// as [deviceConnection] — both interfaces are implemented by a
-  /// single class (`MockManager` for development, `BLEManager` for the
-  /// live device). The mock/live swap happens on the single line in
-  /// [init] below.
+  /// The shared air-quality data source. See `dataSource` note on the
+  /// cutover line inside [init]: same instance also implements
+  /// [DeviceConnection] and is exposed via [deviceConnection].
   late final AirQualityDataSource dataSource;
 
-  /// The shared device-connection surface: connection state, battery,
-  /// buffered count, pair/scan/forget actions. Same underlying
-  /// instance as [dataSource] under a different interface, so
-  /// subscribers can hold exactly the surface they care about without
-  /// leaking device concepts into air-quality consumers or vice versa.
+  /// The shared device-connection surface. Same underlying instance as
+  /// [dataSource] — split into two fields so consumers only depend on
+  /// the half they need.
   late final DeviceConnection deviceConnection;
 
-  /// Drift database. Used by [readingsRepository]; screens should not
-  /// query it directly.
+  /// Drift database. Used by [readingsRepository]; screens should
+  /// not query it directly.
   late final AppDatabase database;
 
   /// Subscribes to [dataSource] from app startup and persists every
@@ -56,10 +52,12 @@ class AppServices {
 
     await TflMapData.instance.load();
 
-    // ── The BLE cutover lives on this line ───────────────────────
-    // Step 3 (current): MockManager backs both interfaces.
-    // Step 7 (cutover): swap `MockManager()` for `BLEManager()`.
-    // Nothing else in the app needs to change.
+    // ── The BLE cutover lives on these three lines ─────────────────
+    // Step 4 (current): MockManager backs both interfaces. BLEManager
+    //   is exercised only via the dev harness on the home screen.
+    // Step 7 (cutover): swap `MockManager()` for `BLEManager()` and add
+    //   `await manager.start()` on the following line to fire the
+    //   silent auto-reconnect. Nothing else in the app needs to change.
     final manager = MockManager();
     dataSource = manager;
     deviceConnection = manager;
@@ -75,8 +73,8 @@ class AppServices {
         StationClassificationService(dataSource, readingsRepository);
     classificationService.start();
     // Note: startLocationTracking() is deliberately NOT called here.
-    // Location permission must not be requested in main() before any
-    // UI exists — the main scaffold calls it once it is on screen.
+    // Location permission must not be requested in main() before any UI
+    // exists — the main scaffold calls it once it is on screen.
 
     _initialised = true;
   }
@@ -85,13 +83,11 @@ class AppServices {
   /// on a real device.
   Future<void> dispose() async {
     if (!_initialised) return;
-    // Reverse order of creation: service first (it listens to the
-    // data source), then the repository (which closes the database).
+    // Reverse order of creation: service first (it listens to the data
+    // source), then the repository (which closes the database).
     await classificationService.dispose();
     await readingsRepository.dispose(); // also closes the database
     dataSource.dispose();
-    // deviceConnection points at the same instance as dataSource, so
-    // no separate dispose call is needed.
     _initialised = false;
   }
 }

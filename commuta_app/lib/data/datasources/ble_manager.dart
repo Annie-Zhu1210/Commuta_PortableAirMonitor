@@ -1,185 +1,508 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 
+import 'package:flutter/foundation.dart';
+import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import '../../core/constants/ble_uuids.dart';
 import '../../services/device_connection.dart';
 import '../models/air_quality_reading.dart';
 import 'air_quality_datasource.dart';
 
-/// Live-device implementation of both [AirQualityDataSource] and
-/// [DeviceConnection].
+/// Real BLE implementation of [AirQualityDataSource] and [DeviceConnection].
 ///
-/// Step 3 status: STUB. The class compiles, all interface methods
-/// exist, the stream controllers are wired up, and the state machine
-/// transitions on stub events — but no actual BLE work is performed
-/// anywhere. Scan does not scan; pair does not connect; the live
-/// readings stream is created but never receives readings.
-///
-/// Real behaviour is filled in over Steps 4–6:
-///   • Step 4 — [startScan], [pair], [forget], [reconnect] talk to
-///     `flutter_blue_plus` and persist to `SharedPreferences`.
-///   • Step 5 — Live and Status characteristic notifications are
-///     decoded and emitted on the streams.
-///   • Step 6 — Buffered characteristic sync protocol.
-///
-/// The Step 7 cutover swaps this class in for `MockManager` by
-/// changing one line in `AppServices.init()`.
+/// See BLE_Integration_Plan.md for the full context. Step 4
+/// responsibilities: scan, connect, characteristic discovery, notify
+/// subscriptions, MTU 247 (Android), SharedPreferences persistence,
+/// silent auto-reconnect, forget. Parsing lands in Step 5.
 class BLEManager implements AirQualityDataSource, DeviceConnection {
-  BLEManager();
+  static const String _prefsKey = 'commuta_paired_peripheral_id';
 
-  // ── Reading stream ──────────────────────────────────────────────
+  static const Duration _scanTimeout                = Duration(seconds: 10);
+  static const Duration _connectTimeout             = Duration(seconds: 15);
+  static const Duration _autoReconnectTimeout       = Duration(seconds: 10);
+  static const Duration _autoReconnectScanTimeout   = Duration(seconds: 12);
+  static const int _targetMtu = 247;
 
-  StreamController<AirQualityReading>? _readingController;
+  bool _started = false;
+  DeviceConnectionState _currentState = DeviceConnectionState.idle;
+  final _stateController =
+      StreamController<DeviceConnectionState>.broadcast();
+
+  final ValueNotifier<bool> _pairingComplete = ValueNotifier<bool>(false);
+  final ValueNotifier<DateTime?> _lastSeenNotifier =
+      ValueNotifier<DateTime?>(null);
+  bool _shuttingDownReceived = false;
+
+  int? _batteryPercent;
+  int? _bufferedCount;
+  AirQualityReading? _latestReading;
+  DeviceStatus? _latestStatus;
+
+  String? _persistedIdentifier;
+
+  BluetoothDevice? _connectedDevice;
+  BluetoothCharacteristic? _liveCharacteristic;
+  BluetoothCharacteristic? _statusCharacteristic;
+  BluetoothCharacteristic? _bufferedCharacteristic;
+
+  final _liveReadingsController =
+      StreamController<AirQualityReading>.broadcast();
+  final _statusController =
+      StreamController<DeviceStatus>.broadcast();
+  final _scanResultsController =
+      StreamController<List<DiscoveredDevice>>.broadcast();
+
+  StreamSubscription<List<ScanResult>>? _scanSubscription;
+  StreamSubscription<BluetoothConnectionState>? _connectionStateSubscription;
+  StreamSubscription<List<int>>? _liveNotificationSubscription;
+  StreamSubscription<List<int>>? _statusNotificationSubscription;
+
+  // ── DeviceConnection: read-only surfaces ───────────────────────────────
 
   @override
-  Stream<AirQualityReading> subscribeToLiveReadings() {
-    // Broadcast so Home and ReadingsRepository can both subscribe
-    // without collision. Created lazily on first listen; will not
-    // emit until Step 5 wires up notification parsing.
-    _readingController ??= StreamController<AirQualityReading>.broadcast();
-    return _readingController!.stream;
-  }
+  Stream<DeviceConnectionState> get stateStream => _stateController.stream;
 
   @override
-  Future<AirQualityReading?> getLatestReading() async {
-    // Real behaviour arrives in Step 5, where the most recent reading
-    // is cached on each Live notification.
-    return null;
-  }
+  DeviceConnectionState get currentState => _currentState;
+
+  @override
+  Stream<DeviceStatus> get statusStream => _statusController.stream;
+
+  @override
+  DeviceStatus? get latestStatus => _latestStatus;
+
+  @override
+  int? get batteryPercent => _batteryPercent;
+
+  @override
+  int? get bufferedCount => _bufferedCount;
+
+  @override
+  DateTime? get lastSeen => _lastSeenNotifier.value;
+
+  @override
+  ValueListenable<DateTime?> get lastSeenListenable => _lastSeenNotifier;
+
+  @override
+  ValueListenable<bool> get pairingCompleteListenable => _pairingComplete;
+
+  @override
+  bool get shuttingDownReceived => _shuttingDownReceived;
+
+  @override
+  Stream<List<DiscoveredDevice>> get scanResults =>
+      _scanResultsController.stream;
+
+  // ── AirQualityDataSource surfaces ──────────────────────────────────────
+
+  @override
+  Stream<AirQualityReading> subscribeToLiveReadings() =>
+      _liveReadingsController.stream;
 
   @override
   Future<List<AirQualityReading>> getHistoricalReadings({
     required DateTime from,
     required DateTime to,
   }) async {
-    // Historical queries are served from the Drift database via the
-    // History screen, not from the BLE device directly. This method
-    // exists to satisfy the interface but is not the intended query
-    // path.
-    return const [];
-  }
-
-  // ── Connection-state stream ─────────────────────────────────────
-
-  StreamController<DeviceConnectionState>? _stateController;
-  DeviceConnectionState _currentState = DeviceConnectionState.idle;
-
-  void _transitionTo(DeviceConnectionState next) {
-    if (_currentState == next) return;
-    _currentState = next;
-    _stateController?.add(next);
+    return const <AirQualityReading>[];
   }
 
   @override
-  Stream<DeviceConnectionState> get stateStream {
-    _stateController ??= StreamController<DeviceConnectionState>.broadcast();
-    return _stateController!.stream;
+  Future<AirQualityReading?> getLatestReading() async => _latestReading;
+
+  // ── Lifecycle ──────────────────────────────────────────────────────────
+
+  @override
+  Future<void> start() async {
+    if (_started) return;
+    _started = true;
+
+    final prefs = await SharedPreferences.getInstance();
+    _persistedIdentifier = prefs.getString(_prefsKey);
+    _pairingComplete.value = _persistedIdentifier != null;
+
+    if (_persistedIdentifier != null) {
+      debugPrint(
+        '[BLEManager] start(): persisted identifier found '
+        '($_persistedIdentifier); auto-reconnect will run.',
+      );
+      unawaited(_attemptAutoReconnect(_persistedIdentifier!));
+    } else {
+      debugPrint(
+        '[BLEManager] start(): no persisted identifier, staying idle.',
+      );
+    }
   }
 
-  @override
-  DeviceConnectionState get currentState => _currentState;
+  Future<void> _attemptAutoReconnect(String identifier) async {
+    debugPrint('[BLEManager] Auto-reconnect starting for $identifier');
+    _transitionTo(DeviceConnectionState.connecting);
 
-  // ── Status stream ───────────────────────────────────────────────
+    // Wait for iOS's CBCentralManager to settle into poweredOn.
+    // Attempting connect() during CBManagerStateUnknown throws
+    // immediately.
+    try {
+      await FlutterBluePlus.adapterState
+          .where((s) => s == BluetoothAdapterState.on)
+          .first
+          .timeout(const Duration(seconds: 5));
+    } catch (_) {
+      debugPrint(
+        '[BLEManager] Bluetooth adapter not ready within 5 s; '
+        'attempting auto-reconnect anyway.',
+      );
+    }
 
-  StreamController<DeviceStatus>? _statusController;
-  DeviceStatus? _latestStatus;
-  DateTime? _lastSeen;
+    // Scan-then-connect. Direct connect on a persisted identifier
+    // reliably hangs on iOS after an app force-quit — the peripheral
+    // is still in "connected" state from its own side (BLE supervision
+    // timeout hasn't fired yet) and iOS's cached peripheral reference
+    // is stale. Scanning first refreshes iOS's cache and yields a
+    // fresh peripheral handle that connect() can talk to. Same
+    // workaround nRF Connect uses under the hood.
+    final device = await _findPeripheralByScan(identifier);
+    if (device == null) {
+      debugPrint(
+        '[BLEManager] Auto-reconnect: peripheral not found via scan '
+        '(out of range, powered off, or not advertising).',
+      );
+      _transitionTo(DeviceConnectionState.disconnected);
+      return;
+    }
+    debugPrint(
+      '[BLEManager] Auto-reconnect: peripheral discovered via scan, '
+      'attempting connect().',
+    );
 
-  @override
-  Stream<DeviceStatus> get statusStream {
-    _statusController ??= StreamController<DeviceStatus>.broadcast();
-    return _statusController!.stream;
+    try {
+      await device.connect(timeout: _autoReconnectTimeout);
+      await _completeConnectFlow(device);
+      debugPrint('[BLEManager] Auto-reconnect succeeded.');
+    } catch (e) {
+      debugPrint('[BLEManager] Auto-reconnect failed: $e');
+      _transitionTo(DeviceConnectionState.disconnected);
+    }
   }
 
-  @override
-  DeviceStatus? get latestStatus => _latestStatus;
+  /// Scans (filtered by the Commuta service UUID) up to
+  /// [_autoReconnectScanTimeout] for a peripheral whose remoteId
+  /// matches [identifier]. Returns the peripheral if found (scan
+  /// stopped early), null on timeout.
+  Future<BluetoothDevice?> _findPeripheralByScan(String identifier) async {
+    final completer = Completer<BluetoothDevice?>();
+    final sub = FlutterBluePlus.scanResults.listen((results) {
+      for (final r in results) {
+        if (r.device.remoteId.str == identifier) {
+          if (!completer.isCompleted) completer.complete(r.device);
+          return;
+        }
+      }
+    });
 
-  @override
-  int? get batteryPercent => _latestStatus?.batteryPercent;
+    try {
+      await FlutterBluePlus.startScan(
+        withServices: [Guid(BleUuids.service)],
+        timeout: _autoReconnectScanTimeout,
+      );
+    } catch (e) {
+      debugPrint('[BLEManager] Reconnect-scan failed to start: $e');
+      if (!completer.isCompleted) completer.complete(null);
+    }
 
-  @override
-  int? get bufferedCount => _latestStatus?.bufferedCount;
+    final result = await completer.future.timeout(
+      _autoReconnectScanTimeout + const Duration(seconds: 1),
+      onTimeout: () => null,
+    );
 
-  @override
-  DateTime? get lastSeen => _lastSeen;
-
-  @override
-  bool get shuttingDownReceived => _latestStatus?.shuttingDown ?? false;
-
-  // ── Scan stream ─────────────────────────────────────────────────
-
-  StreamController<DiscoveredDevice>? _scanController;
-
-  @override
-  Stream<DiscoveredDevice> get scanResults {
-    _scanController ??= StreamController<DiscoveredDevice>.broadcast();
-    return _scanController!.stream;
+    await sub.cancel();
+    if (FlutterBluePlus.isScanningNow) {
+      try {
+        await FlutterBluePlus.stopScan();
+      } catch (_) {}
+    }
+    return result;
   }
 
-  // ── Pairing state ───────────────────────────────────────────────
-
-  bool _isPaired = false;
-
-  @override
-  bool get isPaired => _isPaired;
-
-  // ── Actions (stubs — transitions only, no BLE calls) ────────────
+  // ── Scanning ───────────────────────────────────────────────────────────
 
   @override
   Future<void> startScan() async {
-    // Step 4 will replace this with an actual flutter_blue_plus scan
-    // filtered on BleUuids.service. For now, just transition state so
-    // any UI wired to the state stream sees the change.
+    if (_currentState == DeviceConnectionState.scanning) return;
+    if (_currentState == DeviceConnectionState.connected ||
+        _currentState == DeviceConnectionState.syncingBuffered) {
+      debugPrint('[BLEManager] Ignoring startScan: already connected.');
+      return;
+    }
+
+    // iOS reports CBManagerStateUnknown briefly at process start.
+    // Wait for the adapter to settle into poweredOn before scanning.
+    // Bounded wait so a genuinely-off adapter still surfaces the error.
+    try {
+      await FlutterBluePlus.adapterState
+          .where((s) => s == BluetoothAdapterState.on)
+          .first
+          .timeout(const Duration(seconds: 3));
+    } catch (_) {
+      debugPrint(
+        '[BLEManager] Bluetooth adapter not ready within 3 s; '
+        'attempting scan anyway.',
+      );
+    }
+
     _transitionTo(DeviceConnectionState.scanning);
+
+    _scanSubscription = FlutterBluePlus.scanResults.listen(
+      (results) {
+        final devices = results
+            .map(
+              (r) => DiscoveredDevice(
+                identifier: r.device.remoteId.str,
+                name: r.device.platformName.isNotEmpty
+                    ? r.device.platformName
+                    : (r.advertisementData.advName.isNotEmpty
+                        ? r.advertisementData.advName
+                        : 'Unknown'),
+                rssi: r.rssi,
+              ),
+            )
+            .toList(growable: false);
+        if (!_scanResultsController.isClosed) {
+          _scanResultsController.add(devices);
+        }
+      },
+      onError: (Object e) {
+        debugPrint('[BLEManager] Scan stream error: $e');
+      },
+    );
+
+    try {
+      await FlutterBluePlus.startScan(
+        withServices: [Guid(BleUuids.service)],
+        timeout: _scanTimeout,
+      );
+    } catch (e) {
+      debugPrint('[BLEManager] startScan failed: $e');
+      await stopScan();
+    }
   }
 
   @override
   Future<void> stopScan() async {
-    // Step 4 will refine the return-state logic (e.g. back to
-    // connected if the user cancels a re-scan). Idle is the sensible
-    // default for the stub.
-    _transitionTo(DeviceConnectionState.idle);
+    if (FlutterBluePlus.isScanningNow) {
+      try {
+        await FlutterBluePlus.stopScan();
+      } catch (e) {
+        debugPrint('[BLEManager] stopScan failed: $e');
+      }
+    }
+    await _scanSubscription?.cancel();
+    _scanSubscription = null;
+    if (!_scanResultsController.isClosed) {
+      _scanResultsController.add(const <DiscoveredDevice>[]);
+    }
+    if (_currentState == DeviceConnectionState.scanning) {
+      _transitionTo(
+        _connectedDevice != null
+            ? DeviceConnectionState.connected
+            : DeviceConnectionState.idle,
+      );
+    }
   }
+
+  // ── Pairing / connecting ───────────────────────────────────────────────
 
   @override
   Future<void> pair(DiscoveredDevice device) async {
-    // Step 4: open a GATT connection, discover services, subscribe to
-    // Live and Status characteristics, request MTU 247, persist
-    // `device.id` to SharedPreferences. Left in `connecting`
-    // intentionally in the stub — a UI wired to this without Step 4
-    // done should be visibly stuck, not silently claim success.
+    await stopScan();
     _transitionTo(DeviceConnectionState.connecting);
-  }
 
-  @override
-  Future<void> forget() async {
-    // Step 4: cancel the live GATT connection, clear the persisted
-    // identifier from SharedPreferences.
-    _isPaired = false;
-    _latestStatus = null;
-    _lastSeen = null;
-    _transitionTo(DeviceConnectionState.idle);
+    try {
+      final btDevice = BluetoothDevice.fromId(device.identifier);
+      await btDevice.connect(timeout: _connectTimeout);
+      await _completeConnectFlow(btDevice);
+
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_prefsKey, device.identifier);
+      _persistedIdentifier = device.identifier;
+      _pairingComplete.value = true;
+      debugPrint(
+        '[BLEManager] pair(): identifier persisted (${device.identifier}).',
+      );
+    } catch (e) {
+      debugPrint('[BLEManager] pair(${device.identifier}) failed: $e');
+      _transitionTo(DeviceConnectionState.disconnected);
+      rethrow;
+    }
   }
 
   @override
   Future<void> reconnect() async {
-    // Step 4: read the persisted identifier from SharedPreferences,
-    // attempt to reconnect via CoreBluetooth identifier-based
-    // retrieval (iOS) or MAC-based reconnect (Android). Fails silently
-    // if the device is out of range.
-    if (!_isPaired) return;
-    _transitionTo(DeviceConnectionState.connecting);
+    if (_persistedIdentifier == null) {
+      debugPrint('[BLEManager] reconnect: nothing persisted, no-op.');
+      return;
+    }
+    await _attemptAutoReconnect(_persistedIdentifier!);
   }
 
-  // ── Lifecycle ───────────────────────────────────────────────────
+  Future<void> _completeConnectFlow(BluetoothDevice device) async {
+    _connectedDevice = device;
+
+    await _connectionStateSubscription?.cancel();
+    _connectionStateSubscription = device.connectionState.listen(
+      (state) {
+        if (state == BluetoothConnectionState.disconnected) {
+          debugPrint('[BLEManager] Peer initiated disconnect.');
+          unawaited(_teardownConnection());
+          _transitionTo(DeviceConnectionState.disconnected);
+        }
+      },
+    );
+
+    if (Platform.isAndroid) {
+      try {
+        await device.requestMtu(_targetMtu);
+      } catch (e) {
+        debugPrint('[BLEManager] requestMtu failed (non-fatal): $e');
+      }
+    } else {
+      // iOS negotiates MTU asynchronously after connect() returns.
+      // Reading mtuNow immediately gives the pre-negotiation value
+      // (23). Log the true value after a short delay for diagnostics.
+      Future<void>.delayed(const Duration(milliseconds: 500), () {
+        if (_connectedDevice == device) {
+          debugPrint('[BLEManager] iOS negotiated MTU: ${device.mtuNow}');
+        }
+      });
+    }
+
+    final services = await device.discoverServices();
+    BluetoothService? commutaService;
+    for (final s in services) {
+      if (s.uuid == Guid(BleUuids.service)) {
+        commutaService = s;
+        break;
+      }
+    }
+    if (commutaService == null) {
+      throw StateError(
+        'Commuta service ${BleUuids.service} not found on peripheral.',
+      );
+    }
+
+    for (final c in commutaService.characteristics) {
+      if (c.uuid == Guid(BleUuids.liveCharacteristic)) {
+        _liveCharacteristic = c;
+      } else if (c.uuid == Guid(BleUuids.statusCharacteristic)) {
+        _statusCharacteristic = c;
+      } else if (c.uuid == Guid(BleUuids.bufferedCharacteristic)) {
+        _bufferedCharacteristic = c;
+      }
+    }
+    if (_liveCharacteristic == null ||
+        _statusCharacteristic == null ||
+        _bufferedCharacteristic == null) {
+      throw StateError(
+        'One or more Commuta characteristics missing on peripheral.',
+      );
+    }
+
+    await _liveCharacteristic!.setNotifyValue(true);
+    _liveNotificationSubscription =
+        _liveCharacteristic!.lastValueStream.listen(_onLivePacket);
+
+    await _statusCharacteristic!.setNotifyValue(true);
+    _statusNotificationSubscription =
+        _statusCharacteristic!.lastValueStream.listen(_onStatusPacket);
+
+    _transitionTo(DeviceConnectionState.connected);
+  }
+
+  void _onLivePacket(List<int> bytes) {
+    // `lastValueStream` emits an empty list on first subscribe, before
+    // any real notification. Ignore those — they're not real packets.
+    if (bytes.isEmpty) return;
+    _lastSeenNotifier.value = DateTime.now();
+    debugPrint(
+      '[BLEManager] Live packet: ${bytes.length} bytes '
+      '(parsing lands in Step 5).',
+    );
+  }
+
+  void _onStatusPacket(List<int> bytes) {
+    if (bytes.isEmpty) return;
+    _lastSeenNotifier.value = DateTime.now();
+    debugPrint(
+      '[BLEManager] Status packet: ${bytes.length} bytes '
+      '(parsing lands in Step 5).',
+    );
+  }
+
+  // ── Forget ─────────────────────────────────────────────────────────────
+
+  @override
+  Future<void> forget() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_prefsKey);
+    _persistedIdentifier = null;
+    _pairingComplete.value = false;
+
+    await _teardownConnection();
+
+    _batteryPercent = null;
+    _bufferedCount = null;
+    _lastSeenNotifier.value = null;
+    _latestStatus = null;
+    _shuttingDownReceived = false;
+
+    _transitionTo(DeviceConnectionState.idle);
+  }
+
+  // ── Teardown helpers ───────────────────────────────────────────────────
+
+  Future<void> _teardownConnection() async {
+    await _liveNotificationSubscription?.cancel();
+    _liveNotificationSubscription = null;
+    await _statusNotificationSubscription?.cancel();
+    _statusNotificationSubscription = null;
+    await _connectionStateSubscription?.cancel();
+    _connectionStateSubscription = null;
+
+    _liveCharacteristic = null;
+    _statusCharacteristic = null;
+    _bufferedCharacteristic = null;
+
+    final device = _connectedDevice;
+    _connectedDevice = null;
+    if (device != null) {
+      try {
+        await device.disconnect();
+      } catch (e) {
+        debugPrint('[BLEManager] disconnect during teardown failed: $e');
+      }
+    }
+  }
 
   @override
   void dispose() {
-    _readingController?.close();
-    _readingController = null;
-    _stateController?.close();
-    _stateController = null;
-    _statusController?.close();
-    _statusController = null;
-    _scanController?.close();
-    _scanController = null;
+    unawaited(stopScan());
+    unawaited(_teardownConnection());
+    _stateController.close();
+    _liveReadingsController.close();
+    _statusController.close();
+    _scanResultsController.close();
+    _pairingComplete.dispose();
+    _lastSeenNotifier.dispose();
+  }
+
+  // ── Internal ───────────────────────────────────────────────────────────
+
+  void _transitionTo(DeviceConnectionState next) {
+    if (_currentState == next) return;
+    _currentState = next;
+    if (!_stateController.isClosed) {
+      _stateController.add(next);
+    }
   }
 }

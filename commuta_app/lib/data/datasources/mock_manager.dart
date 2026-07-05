@@ -1,9 +1,12 @@
 import 'dart:async';
 import 'dart:math';
 
+import 'package:flutter/foundation.dart';
+
 import '../../services/device_connection.dart';
 import '../models/air_quality_reading.dart';
 import 'air_quality_datasource.dart';
+
 
 /// Development-time implementation of both [AirQualityDataSource] and
 /// [DeviceConnection].
@@ -121,11 +124,18 @@ class MockManager implements AirQualityDataSource, DeviceConnection {
 
   StreamController<DeviceConnectionState>? _stateController;
   StreamController<DeviceStatus>? _statusController;
-  StreamController<DiscoveredDevice>? _scanController;
+  StreamController<List<DiscoveredDevice>>? _scanController;
 
   final DeviceConnectionState _currentState = DeviceConnectionState.connected;
   DeviceStatus? _latestStatus;
-  DateTime? _lastSeen;
+  final ValueNotifier<DateTime?> _lastSeenNotifier =
+      ValueNotifier<DateTime?>(null);
+
+  /// Mock is always "already paired" — initialised to `true` and never
+  /// flips. Exposed reactively so any Step 7 UI wired against
+  /// `pairingCompleteListenable` compiles identically against mock and
+  /// real managers.
+  final ValueNotifier<bool> _pairingComplete = ValueNotifier<bool>(true);
 
   // Simple synthetic battery: drop 1% every 6 ticks (~1 min), floor at
   // 20%, wrap back to 100%. Purely to make the UI look alive.
@@ -146,7 +156,7 @@ class MockManager implements AirQualityDataSource, DeviceConnection {
 
   void _emitTick() {
     final reading = _buildReading();
-    _lastSeen = DateTime.now();
+    _lastSeenNotifier.value = DateTime.now();
     _readingController?.add(reading);
     _emitSyntheticStatus();
   }
@@ -187,8 +197,9 @@ class MockManager implements AirQualityDataSource, DeviceConnection {
   }
 
   @override
-  Stream<DiscoveredDevice> get scanResults {
-    _scanController ??= StreamController<DiscoveredDevice>.broadcast();
+  Stream<List<DiscoveredDevice>> get scanResults {
+    _scanController ??=
+        StreamController<List<DiscoveredDevice>>.broadcast();
     return _scanController!.stream;
   }
 
@@ -205,21 +216,34 @@ class MockManager implements AirQualityDataSource, DeviceConnection {
   int? get bufferedCount => _latestStatus?.bufferedCount;
 
   @override
-  DateTime? get lastSeen => _lastSeen;
+  DateTime? get lastSeen => _lastSeenNotifier.value;
 
   @override
-  bool get isPaired => true; // Mock is always "already paired".
+  ValueListenable<DateTime?> get lastSeenListenable => _lastSeenNotifier;
+
+  @override
+  ValueListenable<bool> get pairingCompleteListenable => _pairingComplete;
 
   @override
   bool get shuttingDownReceived => false;
 
   // Action methods: all no-ops. The mock is always connected; there is
-  // nothing to scan for, pair with, forget, or reconnect to. The state
-  // stream is intentionally silent so a UI wired up against the mock
-  // sees only the always-connected initial state.
+  // nothing to start, scan for, pair with, forget, or reconnect to.
+  // The state stream is intentionally silent so a UI wired up against
+  // the mock sees only the always-connected initial state.
 
   @override
-  Future<void> startScan() async {}
+  Future<void> start() async {}
+
+  @override
+  Future<void> startScan() async {
+    // The mock never advertises discoverable peripherals; emit an
+    // empty snapshot so any subscribed scan UI shows "no devices"
+    // cleanly rather than a bare loading spinner forever.
+    _scanController ??=
+        StreamController<List<DiscoveredDevice>>.broadcast();
+    _scanController!.add(const <DiscoveredDevice>[]);
+  }
 
   @override
   Future<void> stopScan() async {}
@@ -249,5 +273,8 @@ class MockManager implements AirQualityDataSource, DeviceConnection {
     _statusController = null;
     _scanController?.close();
     _scanController = null;
+    _pairingComplete.dispose();
+    _pairingComplete.dispose();
+    _lastSeenNotifier.dispose();
   }
 }

@@ -6,8 +6,6 @@ import '../../data/datasources/air_quality_datasource.dart';
 import '../../data/models/air_quality_reading.dart';
 import '../../widgets/metric_card.dart';
 import '../../widgets/metric_info_sheet.dart';
-import 'package:flutter/foundation.dart' show kDebugMode;
-import '../../dev/ble_dev_harness_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -41,6 +39,7 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
+  @override
   void dispose() {
     // _dataSource lifecycle is owned by AppServices — don't dispose here.
     super.dispose();
@@ -48,6 +47,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Note: the debug FAB that opened the BLE dev harness has been
+    // removed in Step 7b. The harness now lives at
+    // Profile → Developer → Diagnostics (kDebugMode only).
     return Scaffold(
       backgroundColor: AppColours.background,
       body: _isLoading
@@ -58,25 +60,6 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             )
           : _buildDashboard(),
-      // ── Dev-only entry point to the BLE harness ─────────────────────────
-      // Present only in debug builds (`kDebugMode` is a const tree-shaken
-      // to `false` in release, so this FAB disappears entirely from the
-      // production binary). Removed or feature-flagged off in Step 7 once
-      // the real pair UI and Settings device section exist.
-      floatingActionButton: kDebugMode
-          ? FloatingActionButton.small(
-              heroTag: 'ble_dev_harness',
-              tooltip: 'BLE dev harness',
-              backgroundColor: AppColours.accent,
-              foregroundColor: Colors.white,
-              onPressed: () => Navigator.of(context).push(
-                MaterialPageRoute(
-                  builder: (_) => const BleDevHarnessScreen(),
-                ),
-              ),
-              child: const Icon(Icons.bluetooth_searching),
-            )
-          : null,
     );
   }
 

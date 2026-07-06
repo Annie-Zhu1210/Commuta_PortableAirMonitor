@@ -5,6 +5,7 @@ import '../data/database/app_database.dart';
 import '../data/datasources/air_quality_datasource.dart';
 import '../data/datasources/ble_manager.dart';
 import 'device_connection.dart';
+import 'device_persistence_service.dart';
 import 'readings_repository.dart';
 import 'station_classification_service.dart';
 import 'tfl_map_data.dart';
@@ -12,9 +13,10 @@ import 'tfl_map_data.dart';
 /// Process-wide service holder.
 ///
 /// Holds the shared [AirQualityDataSource], the sibling
-/// [DeviceConnection], the [AppDatabase], the [ReadingsRepository], and
-/// the [StationClassificationService], so every screen reads from the
-/// same instances and every reading lands in one durable store.
+/// [DeviceConnection], the [AppDatabase], the [ReadingsRepository],
+/// the [StationClassificationService], and the
+/// [DevicePersistenceService], so every screen reads from the same
+/// instances and every reading lands in one durable store.
 /// Initialised once in `main()` before `runApp`.
 ///
 /// Pattern mirrors [TflMapData.instance].
@@ -38,9 +40,9 @@ class AppServices {
   /// [deviceConnection].
   late final AirQualityDataSource dataSource;
 
-  /// The shared device-connection surface. Same underlying instance as
-  /// [dataSource] — split into two fields so consumers only depend on
-  /// the half they need.
+  /// The shared device-connection surface. Same underlying instance
+  /// as [dataSource] — split into two fields so consumers only depend
+  /// on the half they need.
   late final DeviceConnection deviceConnection;
 
   /// Drift database. Used by [readingsRepository]; screens should
@@ -57,10 +59,17 @@ class AppServices {
   /// classification continues regardless of which tab is open.
   late final StationClassificationService classificationService;
 
+  /// Cross-session persistence for the last-seen timestamp and the
+  /// "samples not yet synced" flag. Seeded from prefs on init and
+  /// kept in sync via listeners on the shared [deviceConnection].
+  /// Read by the Device sub-page and by any other surface that
+  /// needs those values to survive a force-quit.
+  late final DevicePersistenceService devicePersistence;
+
   /// Idempotent app-startup bootstrap. Call once from `main()` after
   /// `WidgetsFlutterBinding.ensureInitialized()` and before `runApp`.
   ///
-  /// Sequencing (Step 7 cutover):
+  /// Sequencing (Step 7 cutover, extended in 7b):
   ///   1. TfL map data loads first — no BLE dependencies, position
   ///      is unimportant.
   ///   2. Database is created before the mock-clear check so the DAO
@@ -76,10 +85,14 @@ class AppServices {
   ///      wired (the provider is a reference to one of its methods)
   ///      and started *before* the BLE manager (so live and buffered
   ///      subscriptions exist before the first packet can arrive).
-  ///   6. `bleManager.start()` is awaited last; it returns as soon
-  ///      as the persisted identifier has been read from
+  ///   6. `bleManager.start()` is awaited. It returns as soon as
+  ///      the persisted identifier has been read from
   ///      SharedPreferences. The auto-reconnect itself runs in the
   ///      background and does not block `init()`.
+  ///   7. (7b) [DevicePersistenceService] is created and started
+  ///      after the manager. It reuses the already-loaded `prefs`
+  ///      instance and attaches listeners to the manager's
+  ///      last-seen listenable and status stream.
   Future<void> init() async {
     if (_initialised) return;
 
@@ -136,6 +149,14 @@ class AppServices {
     // reconnect runs in the background.
     await manager.start();
 
+    // ── Device persistence (7b) ──────────────────────────────────
+    // Wired after the manager is available so the service can hook
+    // onto the manager's `lastSeenListenable` and `statusStream`
+    // straight away. Reuses the `prefs` instance opened above.
+    devicePersistence =
+        DevicePersistenceService(prefs, deviceConnection);
+    devicePersistence.start();
+
     // ── Classification service ───────────────────────────────────
     classificationService =
         StationClassificationService(dataSource, readingsRepository);
@@ -151,9 +172,11 @@ class AppServices {
   /// on a real device.
   Future<void> dispose() async {
     if (!_initialised) return;
-    // Reverse order of creation: service first (it listens to the data
-    // source), then the repository (which closes the database).
+    // Reverse order of creation: services that only listen come
+    // first, then the repository (which closes the database), then
+    // the data source itself.
     await classificationService.dispose();
+    await devicePersistence.dispose();
     await readingsRepository.dispose(); // also closes the database
     dataSource.dispose();
     _initialised = false;

@@ -102,10 +102,8 @@ class _BleDevHarnessScreenState extends State<BleDevHarnessScreen> {
                   builder: (context, lastSeen, _) =>
                       Text('Last seen: ${lastSeen ?? "—"}'),
                 ),
-                Text(
-                  'Shutting-down flag received: '
-                  '${_manager.shuttingDownReceived}',
-                ),
+                Text('Shutting-down flag received: '
+                    '${_manager.shuttingDownReceived}'),
               ],
             );
           },
@@ -118,7 +116,10 @@ class _BleDevHarnessScreenState extends State<BleDevHarnessScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('Buffered sync', style: Theme.of(context).textTheme.titleMedium),
+        Text(
+          'Buffered sync',
+          style: Theme.of(context).textTheme.titleMedium,
+        ),
         const SizedBox(height: 8),
         Row(
           children: [
@@ -175,12 +176,21 @@ class _BleDevHarnessScreenState extends State<BleDevHarnessScreen> {
   }
 
   String _formatSyncProgress(BufferedSyncProgress progress) {
+    // Only show attempt suffix when a real attempt has happened
+    // (attemptNumber > 0), and highlight it prominently when we're on
+    // a resume (attemptNumber > 1) so retries are visible at a glance.
+    final attemptSuffix = progress.attemptNumber > 0
+        ? ' (attempt ${progress.attemptNumber}/${BLEManager.syncMaxAttempts})'
+        : '';
+
     final buffer = StringBuffer()
-      ..writeln('Buffered sync — ${progress.phase.name}')
+      ..writeln('Buffered sync — ${progress.phase.name}$attemptSuffix')
       ..writeln('  started:   ${progress.startedAt.toIso8601String()}');
 
     if (progress.completedAt != null) {
-      buffer.writeln('  completed: ${progress.completedAt!.toIso8601String()}');
+      buffer.writeln(
+        '  completed: ${progress.completedAt!.toIso8601String()}',
+      );
     }
     buffer.writeln(
       '  records received: ${progress.recordsReceived}'

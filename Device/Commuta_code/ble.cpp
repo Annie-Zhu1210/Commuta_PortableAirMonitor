@@ -31,6 +31,26 @@ static uint32_t g_pendingEndSeq = 0;      // protected by g_syncMux
 static bool g_syncActive = false;
 static CommutaSyncState g_syncState;
 
+// ---------- Pending-frame buffer (back-pressure) ----------
+// A frame built by commutaBleServiceSync but not yet accepted by the host
+// stack's outgoing-notification queue. This exists because NimBLE's
+// notify() returns false when its ATT tx queue is full (which happens
+// under the burst load of a buffered sync), and if we don't retry we
+// silently drop that frame. Losing a data frame drops records; losing an
+// EOS frame is worse — the phone never learns the stream ended, so it
+// heartbeat-times-out at 30 s with sync half-done.
+//
+// The rule this file enforces: no state advances (no iterator read, no
+// EOS teardown, no new request accepted) while g_pendingFrameLen > 0.
+// The main loop just keeps retrying tryFlushPendingFrame() until notify
+// is accepted, then moves on.
+//
+// Sized to the larger of a full data frame (1 + 6*40 = 241 bytes) and
+// an EOS frame (13 bytes). Static storage — no allocation during sync.
+static uint8_t g_pendingFrame[1 + COMMUTA_SYNC_RECORDS_PER_FRAME * sizeof(CommutaSample)];
+static size_t g_pendingFrameLen = 0;
+static bool g_pendingIsEos = false;
+
 // ---------- Server connection callbacks ----------
 class CommutaServerCallbacks : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer* server, NimBLEConnInfo& info) override {
@@ -161,34 +181,63 @@ bool commutaBleIsSyncActive() { return g_syncActive; }
 // the characteristic's stored value, since the Buffered characteristic is
 // not READ-able and exists purely as a streaming channel.
 
-static void sendDataFrame(const CommutaSample* records, size_t count) {
-  if (!g_charBuf || !g_connected || count == 0) return;
-  uint8_t buf[1 + COMMUTA_SYNC_RECORDS_PER_FRAME * sizeof(CommutaSample)];
-  buf[0] = COMMUTA_SYNC_FRAME_DATA;
-  memcpy(buf + 1, records, count * sizeof(CommutaSample));
-  g_charBuf->notify(buf, 1 + count * sizeof(CommutaSample));
+// Try to push whatever's in the pending-frame slot into the host stack's
+// outgoing queue. Returns true if there's nothing to send OR the notify
+// was accepted (in which case the slot is cleared). Returns false only
+// when notify() was refused — the frame stays in the slot for a retry on
+// the next serviceSync call.
+//
+// notify() being refused is not an error: it's normal back-pressure that
+// happens during buffered sync's high frame rate. NimBLE's ATT tx queue
+// has a small fixed depth; when full, further notifies get rejected until
+// the radio has actually transmitted enough queued packets to make room.
+static bool tryFlushPendingFrame() {
+  if (g_pendingFrameLen == 0) return true;
+  if (!g_charBuf || !g_connected) {
+    // Peer went away with a frame queued. Drop it silently; the sync
+    // state machine's disconnect path will handle everything else.
+    g_pendingFrameLen = 0;
+    g_pendingIsEos = false;
+    return true;
+  }
+  bool ok = g_charBuf->notify(g_pendingFrame, g_pendingFrameLen);
+  if (ok) {
+    g_pendingFrameLen = 0;
+  }
+  return ok;
 }
 
-static void sendEndOfStream(uint32_t firstSeq, uint32_t lastSeq, uint32_t sentCount) {
-  if (!g_charBuf || !g_connected) return;
-  uint8_t buf[1 + 12];
-  buf[0] = COMMUTA_SYNC_FRAME_EOS;
-  memcpy(buf + 1, &firstSeq, 4);
-  memcpy(buf + 5, &lastSeq, 4);
-  memcpy(buf + 9, &sentCount, 4);
-  g_charBuf->notify(buf, sizeof(buf));
-  Serial.printf("BLE: sync EOS first=%u last=%u count=%u\n",
-                (unsigned)firstSeq, (unsigned)lastSeq, (unsigned)sentCount);
+// Copy a data frame into the pending slot. Precondition: g_pendingFrameLen
+// must be 0 (caller flushes any prior frame first).
+static void bufferDataFrame(const CommutaSample* records, size_t count) {
+  g_pendingFrame[0] = COMMUTA_SYNC_FRAME_DATA;
+  memcpy(g_pendingFrame + 1, records, count * sizeof(CommutaSample));
+  g_pendingFrameLen = 1 + count * sizeof(CommutaSample);
+  g_pendingIsEos = false;
+}
+
+// Copy an EOS frame into the pending slot. Precondition as above.
+static void bufferEosFrame(uint32_t firstSeq, uint32_t lastSeq, uint32_t sentCount) {
+  g_pendingFrame[0] = COMMUTA_SYNC_FRAME_EOS;
+  memcpy(g_pendingFrame + 1, &firstSeq, 4);
+  memcpy(g_pendingFrame + 5, &lastSeq, 4);
+  memcpy(g_pendingFrame + 9, &sentCount, 4);
+  g_pendingFrameLen = 13;
+  g_pendingIsEos = true;
 }
 
 void commutaBleServiceSync() {
-  // Disconnect cleanup. Runs on the main loop so it's safe to touch the
-  // file handle inside g_syncState here.
+  // ── 1. Disconnect cleanup ─────────────────────────────────────────────
+  // Runs on the main loop so it's safe to touch the file handle inside
+  // g_syncState here.
   if (!g_connected) {
     if (g_syncActive) {
       commutaSyncEnd(g_syncState);
       g_syncActive = false;
     }
+    // Drop any orphaned frame — we can't send it and the phone has moved on.
+    g_pendingFrameLen = 0;
+    g_pendingIsEos = false;
     // Also clear any pending request that arrived just before the disconnect.
     portENTER_CRITICAL(&g_syncMux);
     g_syncRequested = false;
@@ -196,9 +245,32 @@ void commutaBleServiceSync() {
     return;
   }
 
-  // Snapshot pending-request state under the mutex. Only consume the
-  // request if we're going to act on it now; otherwise leave it set so
-  // we pick it up after the current sync finishes.
+  // ── 2. Flush any frame carried over from a previous call ──────────────
+  // This is the heart of the back-pressure fix. If notify() was refused
+  // last time, we retry here first, and do nothing else this iteration
+  // unless the retry succeeds. The main loop cycles quickly enough that
+  // the host stack's tx queue drains a slot within a handful of calls.
+  if (g_pendingFrameLen > 0) {
+    bool wasEos = g_pendingIsEos;
+    if (!tryFlushPendingFrame()) {
+      // Still refused. Try again next iteration.
+      return;
+    }
+    // Flush succeeded. If the frame that just left was EOS, that means
+    // the stream is genuinely done — tear the iterator down NOW so we
+    // don't fall through to step 4 and buffer a duplicate EOS.
+    if (wasEos) {
+      if (g_syncActive) {
+        commutaSyncEnd(g_syncState);
+        g_syncActive = false;
+      }
+      g_pendingIsEos = false;
+    }
+    // Fall through — a new sync request may be waiting, and a data-
+    // frame flush leaves the iterator ready for the next chunk.
+  }
+
+  // ── 3. Consume a pending sync request ─────────────────────────────────
   bool requested = false;
   uint32_t startSeq = 0, endSeq = 0;
   portENTER_CRITICAL(&g_syncMux);
@@ -210,35 +282,58 @@ void commutaBleServiceSync() {
   }
   portEXIT_CRITICAL(&g_syncMux);
 
-  // Start a new sync.
   if (requested) {
     bool ok = commutaSyncBegin(g_syncState, startSeq, endSeq);
     if (!ok) {
-      // Nothing to send; immediately end with 0 records.
-      sendEndOfStream(0, 0, 0);
+      // Nothing to send. Emit an EOS with all-zeros so the phone still
+      // gets the reconciliation it's waiting for. If notify is refused
+      // right now, next iteration's step 2 will retry.
+      bufferEosFrame(0, 0, 0);
+      Serial.println("BLE: sync empty range; sending EOS(0,0,0)");
+      tryFlushPendingFrame();
       return;
     }
     g_syncActive = true;
     Serial.println("BLE: sync started");
-    return;  // Next call will pull the first chunk
+    return;  // Pull the first chunk next iteration.
   }
 
-  // Service an active stream.
+  // ── 4. Service an active stream ───────────────────────────────────────
   if (g_syncActive) {
     if (g_syncState.active) {
-      // Pull and send one chunk.
+      // Pull one chunk into the pending slot, then attempt to flush.
+      // We only get here when g_pendingFrameLen is 0 (step 2 either had
+      // nothing pending or successfully flushed), so the iterator can
+      // safely advance — the chunk we just read is guaranteed to be
+      // buffered before we could ever pull the next one.
       CommutaSample chunk[COMMUTA_SYNC_RECORDS_PER_FRAME];
       size_t n = commutaSyncReadChunk(g_syncState, chunk,
                                       COMMUTA_SYNC_RECORDS_PER_FRAME);
-      if (n > 0) sendDataFrame(chunk, n);
-      // If the iterator just finished, EOS goes on the next call.
+      if (n > 0) {
+        bufferDataFrame(chunk, n);
+        tryFlushPendingFrame();  // If refused, next iteration retries.
+      }
+      // If n == 0 without s.active having flipped false, that's an
+      // exhausted iterator we'll pick up on the next call (see below).
     } else {
-      // Iterator done — send EOS and tear down.
-      sendEndOfStream(g_syncState.firstSentSeq,
-                      g_syncState.lastSentSeq,
-                      g_syncState.sentCount);
-      commutaSyncEnd(g_syncState);
-      g_syncActive = false;
+      // Iterator done — buffer EOS. Tear-down only happens AFTER the EOS
+      // has been accepted by the stack (handled in step 2's wasEos path
+      // or immediately below if this call's flush succeeds).
+      Serial.printf("BLE: sync EOS first=%u last=%u count=%u\n",
+                    (unsigned)g_syncState.firstSentSeq,
+                    (unsigned)g_syncState.lastSentSeq,
+                    (unsigned)g_syncState.sentCount);
+      bufferEosFrame(g_syncState.firstSentSeq,
+                     g_syncState.lastSentSeq,
+                     g_syncState.sentCount);
+      if (tryFlushPendingFrame()) {
+        // EOS accepted immediately. Safe to tear down now.
+        commutaSyncEnd(g_syncState);
+        g_syncActive = false;
+        g_pendingIsEos = false;
+      }
+      // Else: EOS remains in the pending slot. Next iteration's step 2
+      // will keep retrying and tear down once accepted.
     }
   }
 }

@@ -1,6 +1,9 @@
+import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
 import '../data/database/app_database.dart';
 import '../data/datasources/air_quality_datasource.dart';
-import '../data/datasources/mock_manager.dart';
+import '../data/datasources/ble_manager.dart';
 import 'device_connection.dart';
 import 'readings_repository.dart';
 import 'station_classification_service.dart';
@@ -19,11 +22,20 @@ class AppServices {
   AppServices._();
   static final AppServices instance = AppServices._();
 
+  /// SharedPreferences key gating the one-shot clear of any mock
+  /// readings left over from before the BLE cutover. Set to `true`
+  /// once the clear has run so subsequent launches skip it entirely.
+  ///
+  /// The `_v1` suffix leaves room to bump the key if a future
+  /// migration ever needs to re-run a similar one-shot wipe against
+  /// a different `sourceFlag`.
+  static const String _mockReadingsClearedKey = 'mock_readings_cleared_v1';
+
   bool _initialised = false;
 
-  /// The shared air-quality data source. See `dataSource` note on the
-  /// cutover line inside [init]: same instance also implements
-  /// [DeviceConnection] and is exposed via [deviceConnection].
+  /// The shared air-quality data source. Same underlying [BLEManager]
+  /// instance also implements [DeviceConnection] and is exposed via
+  /// [deviceConnection].
   late final AirQualityDataSource dataSource;
 
   /// The shared device-connection surface. Same underlying instance as
@@ -47,34 +59,90 @@ class AppServices {
 
   /// Idempotent app-startup bootstrap. Call once from `main()` after
   /// `WidgetsFlutterBinding.ensureInitialized()` and before `runApp`.
+  ///
+  /// Sequencing (Step 7 cutover):
+  ///   1. TfL map data loads first — no BLE dependencies, position
+  ///      is unimportant.
+  ///   2. Database is created before the mock-clear check so the DAO
+  ///      call has somewhere to run.
+  ///   3. The one-shot mock-clear runs before the repository is
+  ///      wired, so the repository never subscribes against a table
+  ///      still holding `sourceFlag = 'mock'` rows from the previous
+  ///      MockManager era.
+  ///   4. BLEManager is created as a concrete reference so
+  ///      `highestSequenceProvider` can be wired — the field is on
+  ///      the concrete class, not on either interface.
+  ///   5. The repository is constructed *before* the provider is
+  ///      wired (the provider is a reference to one of its methods)
+  ///      and started *before* the BLE manager (so live and buffered
+  ///      subscriptions exist before the first packet can arrive).
+  ///   6. `bleManager.start()` is awaited last; it returns as soon
+  ///      as the persisted identifier has been read from
+  ///      SharedPreferences. The auto-reconnect itself runs in the
+  ///      background and does not block `init()`.
   Future<void> init() async {
     if (_initialised) return;
 
     await TflMapData.instance.load();
 
-    // ── The BLE cutover lives on these three lines ─────────────────
-    // Step 4 (current): MockManager backs both interfaces. BLEManager
-    //   is exercised only via the dev harness on the home screen.
-    // Step 7 (cutover): swap `MockManager()` for `BLEManager()` and add
-    //   `await manager.start()` on the following line to fire the
-    //   silent auto-reconnect. Nothing else in the app needs to change.
-    final manager = MockManager();
+    // ── Database ─────────────────────────────────────────────────
+    database = AppDatabase();
+
+    // ── One-shot clear of pre-cutover mock rows ──────────────────
+    // First launch after the BLE cutover deletes every row whose
+    // sourceFlag is 'mock', so buffered sync starts from a truly-
+    // empty DB rather than resuming against the mock's sequence
+    // numbers. Subsequent launches see the flag set and skip the
+    // delete entirely. Zero-touch, idempotent, safe to leave in
+    // the code indefinitely.
+    final prefs = await SharedPreferences.getInstance();
+    if (!(prefs.getBool(_mockReadingsClearedKey) ?? false)) {
+      final removed =
+          await database.deleteReadingsWhereSourceFlag('mock');
+      debugPrint(
+        '[AppServices] Cutover mock-clear: removed $removed row(s) '
+        "where sourceFlag = 'mock'.",
+      );
+      await prefs.setBool(_mockReadingsClearedKey, true);
+    }
+
+    // ── BLE cutover ──────────────────────────────────────────────
+    // Concrete BLEManager reference — needed to wire
+    // `highestSequenceProvider`, which lives on the concrete class
+    // rather than on either interface. The two interface-typed late
+    // finals below both point at the same instance.
+    final manager = BLEManager();
     dataSource = manager;
     deviceConnection = manager;
 
-    database = AppDatabase();
-
-    // Repository first, so raw persistence is subscribed before the
-    // classification service starts attaching stations to readings.
+    // ── Repository ───────────────────────────────────────────────
+    // Constructed before the provider is wired, since the provider
+    // is a reference to one of its methods.
     readingsRepository = ReadingsRepository(database, dataSource);
+
+    // Break the constructor-time chicken-and-egg between repo and
+    // manager: the manager needs to ask the repo for the highest
+    // persisted sequence number when it evaluates buffered sync,
+    // but the repo needs the data source to construct.
+    manager.highestSequenceProvider =
+        readingsRepository.getHighestSequenceNumber;
+
+    // Subscribe before starting the manager, so live and buffered
+    // streams have listeners in place before the first packet.
     readingsRepository.start();
 
+    // Kick off silent auto-reconnect. Returns after the persisted
+    // identifier has been read from SharedPreferences; the actual
+    // reconnect runs in the background.
+    await manager.start();
+
+    // ── Classification service ───────────────────────────────────
     classificationService =
         StationClassificationService(dataSource, readingsRepository);
     classificationService.start();
     // Note: startLocationTracking() is deliberately NOT called here.
-    // Location permission must not be requested in main() before any UI
-    // exists — the main scaffold calls it once it is on screen.
+    // Location permission must not be requested in main() before any
+    // UI exists — the main scaffold calls it once it is on screen.
 
     _initialised = true;
   }

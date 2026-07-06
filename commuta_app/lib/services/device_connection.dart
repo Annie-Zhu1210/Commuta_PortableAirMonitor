@@ -11,6 +11,38 @@ enum DeviceConnectionState {
   disconnected,
 }
 
+/// The phone's own Bluetooth radio state, decoupled from the state of
+/// the connection to the Commuta device.
+///
+/// Pair-UI and Settings surfaces render a "Bluetooth is off" or
+/// "Grant Bluetooth permission" affordance based on this, distinct
+/// from the pair / scan / connected flow driven by
+/// [DeviceConnectionState].
+///
+/// Deliberately wraps `flutter_blue_plus`'s `BluetoothAdapterState`
+/// rather than passing it through — the [DeviceConnection] interface
+/// stays library-agnostic (`MockManager` never has to import
+/// `flutter_blue_plus`), and this enum collapses transient states
+/// (turning on / off, unavailable on this hardware) into [unknown]
+/// so UI code doesn't have to handle them individually.
+enum BluetoothAvailability {
+  /// Adapter is on and ready to scan / connect.
+  on,
+
+  /// Adapter is off; user needs to enable Bluetooth in system
+  /// settings.
+  off,
+
+  /// App lacks Bluetooth permission; user needs to authorise it in
+  /// system settings.
+  unauthorised,
+
+  /// State is indeterminate — either the adapter is transitioning
+  /// (turningOn / turningOff), unavailable on this hardware, or has
+  /// not yet reported after app start.
+  unknown,
+}
+
 class DeviceStatus {
   DeviceStatus({
     required this.batteryPercent,
@@ -72,6 +104,20 @@ abstract class DeviceConnection {
   bool get shuttingDownReceived;
 
   Stream<List<DiscoveredDevice>> get scanResults;
+
+  /// Reactive view of the phone's Bluetooth adapter state. Emits on
+  /// every change; prefer [adapterState] for a synchronous read.
+  ///
+  /// UI wiring: a top-level "Bluetooth off" or "unauthorised" banner
+  /// listens here and takes precedence over pair-flow affordances,
+  /// since neither pairing nor scanning can proceed unless the
+  /// adapter is [BluetoothAvailability.on].
+  Stream<BluetoothAvailability> get adapterStateStream;
+
+  /// Synchronous read of the current Bluetooth adapter state. Use
+  /// this to seed a `StreamBuilder`'s `initialData` when subscribing
+  /// to [adapterStateStream].
+  BluetoothAvailability get adapterState;
 
   Future<void> start();
   Future<void> startScan();

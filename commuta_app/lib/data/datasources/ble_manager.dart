@@ -108,10 +108,10 @@ class BufferedSyncProgress {
 class BLEManager implements AirQualityDataSource, DeviceConnection {
   static const String _prefsKey = 'commuta_paired_peripheral_id';
 
-  static const Duration _scanTimeout                = Duration(seconds: 10);
-  static const Duration _connectTimeout             = Duration(seconds: 15);
-  static const Duration _autoReconnectTimeout       = Duration(seconds: 10);
-  static const Duration _autoReconnectScanTimeout   = Duration(seconds: 12);
+  static const Duration _scanTimeout = Duration(seconds: 10);
+  static const Duration _connectTimeout = Duration(seconds: 15);
+  static const Duration _autoReconnectTimeout = Duration(seconds: 10);
+  static const Duration _autoReconnectScanTimeout = Duration(seconds: 12);
   static const int _targetMtu = 247;
 
   /// Device sample cadence (matches the firmware). Used to convert
@@ -141,12 +141,12 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
 
   bool _started = false;
   DeviceConnectionState _currentState = DeviceConnectionState.idle;
-  final _stateController =
-      StreamController<DeviceConnectionState>.broadcast();
+  final _stateController = StreamController<DeviceConnectionState>.broadcast();
 
   final ValueNotifier<bool> _pairingComplete = ValueNotifier<bool>(false);
-  final ValueNotifier<DateTime?> _lastSeenNotifier =
-      ValueNotifier<DateTime?>(null);
+  final ValueNotifier<DateTime?> _lastSeenNotifier = ValueNotifier<DateTime?>(
+    null,
+  );
   bool _shuttingDownReceived = false;
 
   int? _batteryPercent;
@@ -180,16 +180,25 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
       StreamController<AirQualityReading>.broadcast();
   final _bufferedReadingsController =
       StreamController<AirQualityReading>.broadcast();
-  final _statusController =
-      StreamController<DeviceStatus>.broadcast();
+  final _statusController = StreamController<DeviceStatus>.broadcast();
   final _scanResultsController =
       StreamController<List<DiscoveredDevice>>.broadcast();
+
+  /// Broadcast controller for [adapterStateStream]. Populated from
+  /// `FlutterBluePlus.adapterState` in [start], mapped through
+  /// [_mapAdapterState] onto our library-agnostic
+  /// [BluetoothAvailability] enum. Never emits until `start()` runs,
+  /// so `pumpAndSettle` in tests doesn't wait on it.
+  final _adapterStateController =
+      StreamController<BluetoothAvailability>.broadcast();
+  BluetoothAvailability _currentAdapterState = BluetoothAvailability.unknown;
 
   StreamSubscription<List<ScanResult>>? _scanSubscription;
   StreamSubscription<BluetoothConnectionState>? _connectionStateSubscription;
   StreamSubscription<List<int>>? _liveNotificationSubscription;
   StreamSubscription<List<int>>? _statusNotificationSubscription;
   StreamSubscription<List<int>>? _bufferedNotificationSubscription;
+  StreamSubscription<BluetoothAdapterState>? _adapterStateSubscription;
 
   // ── Sync state (all cleared in _teardownConnection) ────────────────────
 
@@ -287,6 +296,13 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
   Stream<List<DiscoveredDevice>> get scanResults =>
       _scanResultsController.stream;
 
+  @override
+  Stream<BluetoothAvailability> get adapterStateStream =>
+      _adapterStateController.stream;
+
+  @override
+  BluetoothAvailability get adapterState => _currentAdapterState;
+
   /// Diagnostic sync-progress notifier consumed by the dev harness.
   /// Not on the [DeviceConnection] interface — production UI uses the
   /// coarser [stateStream] instead.
@@ -320,6 +336,25 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
   Future<void> start() async {
     if (_started) return;
     _started = true;
+
+    // Persistent adapter-state subscription for the UI. Kept
+    // separate from the one-shot `.first` waits inside
+    // _attemptAutoReconnect and startScan — those check "is the
+    // adapter on right now?", this publishes changes for as long
+    // as the app is running. FlutterBluePlus.adapterState is a
+    // broadcast stream, so both listeners coexist without conflict.
+    _adapterStateSubscription = FlutterBluePlus.adapterState.listen(
+      (s) {
+        final mapped = _mapAdapterState(s);
+        _currentAdapterState = mapped;
+        if (!_adapterStateController.isClosed) {
+          _adapterStateController.add(mapped);
+        }
+      },
+      onError: (Object e) {
+        debugPrint('[BLEManager] Adapter-state stream error: $e');
+      },
+    );
 
     final prefs = await SharedPreferences.getInstance();
     _persistedIdentifier = prefs.getString(_prefsKey);
@@ -464,8 +499,8 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
                 name: r.device.platformName.isNotEmpty
                     ? r.device.platformName
                     : (r.advertisementData.advName.isNotEmpty
-                        ? r.advertisementData.advName
-                        : 'Unknown'),
+                          ? r.advertisementData.advName
+                          : 'Unknown'),
                 rssi: r.rssi,
               ),
             )
@@ -552,15 +587,13 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
     _connectedDevice = device;
 
     await _connectionStateSubscription?.cancel();
-    _connectionStateSubscription = device.connectionState.listen(
-      (state) {
-        if (state == BluetoothConnectionState.disconnected) {
-          debugPrint('[BLEManager] Peer initiated disconnect.');
-          unawaited(_teardownConnection());
-          _transitionTo(DeviceConnectionState.disconnected);
-        }
-      },
-    );
+    _connectionStateSubscription = device.connectionState.listen((state) {
+      if (state == BluetoothConnectionState.disconnected) {
+        debugPrint('[BLEManager] Peer initiated disconnect.');
+        unawaited(_teardownConnection());
+        _transitionTo(DeviceConnectionState.disconnected);
+      }
+    });
 
     if (Platform.isAndroid) {
       try {
@@ -611,19 +644,20 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
     }
 
     await _liveCharacteristic!.setNotifyValue(true);
-    _liveNotificationSubscription =
-        _liveCharacteristic!.lastValueStream.listen(_onLivePacket);
+    _liveNotificationSubscription = _liveCharacteristic!.lastValueStream.listen(
+      _onLivePacket,
+    );
 
     await _statusCharacteristic!.setNotifyValue(true);
-    _statusNotificationSubscription =
-        _statusCharacteristic!.lastValueStream.listen(_onStatusPacket);
+    _statusNotificationSubscription = _statusCharacteristic!.lastValueStream
+        .listen(_onStatusPacket);
 
     // Buffered characteristic subscription — must be enabled before
     // any sync request is written, otherwise the device's data / EOS
     // frames vanish into the void.
     await _bufferedCharacteristic!.setNotifyValue(true);
-    _bufferedNotificationSubscription =
-        _bufferedCharacteristic!.lastValueStream.listen(_onBufferedPacket);
+    _bufferedNotificationSubscription = _bufferedCharacteristic!.lastValueStream
+        .listen(_onBufferedPacket);
 
     _transitionTo(DeviceConnectionState.connected);
   }
@@ -662,21 +696,21 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
     // raw SGP41 ticks are diagnostically useful even during warm-up
     // and are preserved for the dissertation's JSON export.
     final reading = AirQualityReading(
-      timestamp:              now,
-      pm1:                    packet.pm1,
-      pm25:                   packet.pm25,
-      pm10:                   packet.pm10,
-      co2:                    packet.co2.toDouble(),
-      temperature:            packet.temperature,
-      humidity:               packet.humidity,
-      pressure:               packet.pressure,
+      timestamp: now,
+      pm1: packet.pm1,
+      pm25: packet.pm25,
+      pm10: packet.pm10,
+      co2: packet.co2.toDouble(),
+      temperature: packet.temperature,
+      humidity: packet.humidity,
+      pressure: packet.pressure,
       pressureChangePaPerSec: pressureChangePaPerSec,
-      tvoc:                   packet.conditioning ? null : packet.vocIndex.toDouble(),
-      nox:                    packet.conditioning ? null : packet.noxIndex.toDouble(),
-      vocRaw:                 packet.srawVoc,
-      noxRaw:                 packet.srawNox,
-      sourceFlag:             'live',
-      sequenceNumber:         packet.sequence,
+      tvoc: packet.conditioning ? null : packet.vocIndex.toDouble(),
+      nox: packet.conditioning ? null : packet.noxIndex.toDouble(),
+      vocRaw: packet.srawVoc,
+      noxRaw: packet.srawNox,
+      sourceFlag: 'live',
+      sequenceNumber: packet.sequence,
     );
 
     _latestReading = reading;
@@ -813,9 +847,7 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
           '[BLEManager] Sync: already caught up '
           '(ourHighest=$ourHighest == device newest_buffered_seq).',
         );
-        _publishSkipped(
-          note: 'Already caught up (ourHighest = device newest)',
-        );
+        _publishSkipped(note: 'Already caught up (ourHighest = device newest)');
       } else {
         // ourHighest > newestBufferedSeq — firmware sequence reset
         // (Decision 4A). Two "eras" of sequence numbers coexist in
@@ -872,10 +904,7 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
 
     try {
       final payload = BlePacketParser.encodeSyncRequest(startSeq, endSeq);
-      await _bufferedCharacteristic!.write(
-        payload,
-        withoutResponse: false,
-      );
+      await _bufferedCharacteristic!.write(payload, withoutResponse: false);
     } catch (e) {
       debugPrint(
         '[BLEManager] Sync: request write failed ($e); giving up for '
@@ -937,10 +966,7 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
 
     try {
       final payload = BlePacketParser.encodeSyncRequest(resumeStart, resumeEnd);
-      await _bufferedCharacteristic!.write(
-        payload,
-        withoutResponse: false,
-      );
+      await _bufferedCharacteristic!.write(payload, withoutResponse: false);
     } catch (e) {
       debugPrint(
         '[BLEManager] Sync resume: request write failed ($e); '
@@ -986,10 +1012,10 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
       case BufferedDataFrame(:final records):
         _handleBufferedDataFrame(records);
       case BufferedEosFrame(
-            :final firstSentSeq,
-            :final lastSentSeq,
-            :final sentCount,
-          ):
+        :final firstSentSeq,
+        :final lastSentSeq,
+        :final sentCount,
+      ):
         _handleBufferedEosFrame(
           firstSentSeq: firstSentSeq,
           lastSentSeq: lastSentSeq,
@@ -1013,29 +1039,25 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
       }
 
       final reading = AirQualityReading(
-        timestamp:              timestamp,
-        pm1:                    packet.pm1,
-        pm25:                   packet.pm25,
-        pm10:                   packet.pm10,
-        co2:                    packet.co2.toDouble(),
-        temperature:            packet.temperature,
-        humidity:               packet.humidity,
-        pressure:               packet.pressure,
+        timestamp: timestamp,
+        pm1: packet.pm1,
+        pm25: packet.pm25,
+        pm10: packet.pm10,
+        co2: packet.co2.toDouble(),
+        temperature: packet.temperature,
+        humidity: packet.humidity,
+        pressure: packet.pressure,
         // Pressure-change is a live-only concept — we don't back-fill
         // it for buffered records because doing so would require the
         // previous buffered record in the same run, which may or may
         // not be present in the DB. Leaving it null is honest.
         pressureChangePaPerSec: null,
-        tvoc:                   packet.conditioning
-            ? null
-            : packet.vocIndex.toDouble(),
-        nox:                    packet.conditioning
-            ? null
-            : packet.noxIndex.toDouble(),
-        vocRaw:                 packet.srawVoc,
-        noxRaw:                 packet.srawNox,
-        sourceFlag:             'buffered',
-        sequenceNumber:         packet.sequence,
+        tvoc: packet.conditioning ? null : packet.vocIndex.toDouble(),
+        nox: packet.conditioning ? null : packet.noxIndex.toDouble(),
+        vocRaw: packet.srawVoc,
+        noxRaw: packet.srawNox,
+        sourceFlag: 'buffered',
+        sequenceNumber: packet.sequence,
       );
 
       if (!_bufferedReadingsController.isClosed) {
@@ -1135,15 +1157,13 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
   DateTime? _computeBackfillTimestamp(int recordSeq) {
     final anchor = _liveArrivalAnchor;
     if (anchor == null) return null;
-    final deltaSeconds =
-        (anchor.seq - recordSeq) * _samplingIntervalSecInt;
+    final deltaSeconds = (anchor.seq - recordSeq) * _samplingIntervalSecInt;
     return anchor.arrival.subtract(Duration(seconds: deltaSeconds));
   }
 
   void _armSyncHeartbeat() {
     _syncHeartbeatTimer?.cancel();
-    _syncHeartbeatTimer =
-        Timer(_syncHeartbeatTimeout, _onSyncHeartbeatFired);
+    _syncHeartbeatTimer = Timer(_syncHeartbeatTimeout, _onSyncHeartbeatFired);
   }
 
   void _onSyncHeartbeatFired() {
@@ -1279,6 +1299,8 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
 
   @override
   void dispose() {
+    unawaited(_adapterStateSubscription?.cancel());
+    _adapterStateSubscription = null;
     unawaited(stopScan());
     unawaited(_teardownConnection());
     _stateController.close();
@@ -1286,6 +1308,7 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
     _bufferedReadingsController.close();
     _statusController.close();
     _scanResultsController.close();
+    _adapterStateController.close();
     _pairingComplete.dispose();
     _lastSeenNotifier.dispose();
     _syncProgressNotifier.dispose();
@@ -1298,6 +1321,28 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
     _currentState = next;
     if (!_stateController.isClosed) {
       _stateController.add(next);
+    }
+  }
+
+  /// Maps `flutter_blue_plus`'s [BluetoothAdapterState] onto our
+  /// library-agnostic [BluetoothAvailability] enum. Collapses
+  /// transient states (`turningOn`, `turningOff`), the hardware-
+  /// absent `unavailable`, and the pre-report `unknown` all into
+  /// [BluetoothAvailability.unknown] — UI treats that as "no useful
+  /// information right now" and shows nothing.
+  static BluetoothAvailability _mapAdapterState(BluetoothAdapterState s) {
+    switch (s) {
+      case BluetoothAdapterState.on:
+        return BluetoothAvailability.on;
+      case BluetoothAdapterState.off:
+        return BluetoothAvailability.off;
+      case BluetoothAdapterState.unauthorized:
+        return BluetoothAvailability.unauthorised;
+      case BluetoothAdapterState.unknown:
+      case BluetoothAdapterState.unavailable:
+      case BluetoothAdapterState.turningOn:
+      case BluetoothAdapterState.turningOff:
+        return BluetoothAvailability.unknown;
     }
   }
 }

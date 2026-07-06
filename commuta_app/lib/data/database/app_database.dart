@@ -90,6 +90,20 @@ class AppDatabase extends _$AppDatabase {
       }
     },
   );
+
+  /// Deletes every reading whose `sourceFlag` matches [flag]. Returns
+  /// the number of rows removed.
+  ///
+  /// Used by `AppServices.init` on the one-shot cutover from
+  /// [MockManager] to `BLEManager` (Step 7): the first launch after
+  /// the cutover clears any lingering `sourceFlag = 'mock'` rows so
+  /// the first real buffered sync starts from a truly-empty DB rather
+  /// than resuming against the mock's sequence numbers. Gated by the
+  /// `mock_readings_cleared_v1` SharedPreferences flag in `init`, so
+  /// this DAO method runs at most once per install.
+  Future<int> deleteReadingsWhereSourceFlag(String flag) {
+    return (delete(readings)..where((t) => t.sourceFlag.equals(flag))).go();
+  }
 }
 
 LazyDatabase _openConnection() {

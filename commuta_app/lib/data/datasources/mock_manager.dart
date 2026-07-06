@@ -134,6 +134,13 @@ class MockManager implements AirQualityDataSource, DeviceConnection {
   StreamController<DeviceConnectionState>? _stateController;
   StreamController<DeviceStatus>? _statusController;
   StreamController<List<DiscoveredDevice>>? _scanController;
+  /// Broadcast controller for [adapterStateStream]. Never emits — the
+  /// mock is always [BluetoothAvailability.on] — but is exposed as a
+  /// broadcast stream so UI code wired against the mock has an
+  /// identical shape to the same code wired against `BLEManager`.
+  /// Consumers should seed initial state from [adapterState] and use
+  /// this stream only for changes.
+  StreamController<BluetoothAvailability>? _adapterStateController;
 
   final DeviceConnectionState _currentState = DeviceConnectionState.connected;
   DeviceStatus? _latestStatus;
@@ -213,6 +220,16 @@ class MockManager implements AirQualityDataSource, DeviceConnection {
   }
 
   @override
+  Stream<BluetoothAvailability> get adapterStateStream {
+    _adapterStateController ??=
+        StreamController<BluetoothAvailability>.broadcast();
+    return _adapterStateController!.stream;
+  }
+
+  @override
+  BluetoothAvailability get adapterState => BluetoothAvailability.on;
+
+  @override
   DeviceConnectionState get currentState => _currentState;
 
   @override
@@ -282,6 +299,8 @@ class MockManager implements AirQualityDataSource, DeviceConnection {
     _statusController = null;
     _scanController?.close();
     _scanController = null;
+    _adapterStateController?.close();
+    _adapterStateController = null;
     _pairingComplete.dispose();
     _lastSeenNotifier.dispose();
   }

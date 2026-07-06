@@ -2,25 +2,20 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../data/datasources/ble_manager.dart';
+import '../services/app_services.dart';
 import '../services/device_connection.dart';
 
-/// Dev-only harness for exercising [BLEManager] in isolation before the
-/// Step 7 cutover. Reached from a debug-only FAB on the home screen;
-/// removed (or feature-flagged off) in Step 7 once the real pair UI and
-/// Settings device section exist.
+/// Dev-only harness for observing the shared [BLEManager] owned by
+/// [AppServices] and firing its action methods manually. Reached from
+/// a debug-only FAB on the home screen; will be demoted to a
+/// Settings → Diagnostics sub-page in Step 7b.
 ///
-/// This screen constructs its own [BLEManager] instance, independent of
-/// `AppServices`. Nothing here talks to the mock or to the readings
-/// repository — the purpose is purely to drive the BLE code paths and
-/// observe the connection-state lifecycle.
-///
-/// Step 6 addition: buffered sync needs to know "the highest sequence
-/// number we already have" (normally supplied by
-/// `ReadingsRepository.getHighestSequenceNumber`). Since this harness
-/// deliberately has no repository, [_assumedHighestSeq] stands in for
-/// it — a manually-editable value the tester sets before connecting, to
-/// exercise the fresh-device, partial-catch-up, already-caught-up, and
-/// sequence-reset paths without needing a real database.
+/// Post-cutover this screen no longer constructs its own BLEManager
+/// — doing so ran a second manager instance in parallel with the
+/// primary one that `AppServices` owns, and the two competed for the
+/// same iOS peripheral, disrupting notifications and causing "buffered
+/// frame arrived while not syncing" spam. The harness now purely
+/// observes and controls the shared instance.
 class BleDevHarnessScreen extends StatefulWidget {
   const BleDevHarnessScreen({super.key});
 
@@ -29,29 +24,13 @@ class BleDevHarnessScreen extends StatefulWidget {
 }
 
 class _BleDevHarnessScreenState extends State<BleDevHarnessScreen> {
-  late final BLEManager _manager;
-  final _assumedHighestSeqController = TextEditingController();
-
-  /// Stand-in for `ReadingsRepository.getHighestSequenceNumber()`.
-  /// Null means "simulate an empty database" — sync will request
-  /// everything from sequence 0.
-  int? _assumedHighestSeq;
-
-  @override
-  void initState() {
-    super.initState();
-    _manager = BLEManager();
-    _manager.highestSequenceProvider = () async => _assumedHighestSeq;
-    // Kick off start() so persisted-identifier auto-reconnect runs.
-    _manager.start();
-  }
-
-  @override
-  void dispose() {
-    _assumedHighestSeqController.dispose();
-    _manager.dispose();
-    super.dispose();
-  }
+  /// Shared instance owned by [AppServices]. The cast to [BLEManager]
+  /// is safe post-cutover — the harness is never entered while the
+  /// mock is wired — and gives access to the diagnostic surface
+  /// (`bufferedSyncProgressListenable`, `syncMaxAttempts`) that isn't
+  /// on the [DeviceConnection] interface.
+  final BLEManager _manager =
+      AppServices.instance.deviceConnection as BLEManager;
 
   @override
   Widget build(BuildContext context) {
@@ -121,39 +100,10 @@ class _BleDevHarnessScreenState extends State<BleDevHarnessScreen> {
           style: Theme.of(context).textTheme.titleMedium,
         ),
         const SizedBox(height: 8),
-        Row(
-          children: [
-            Expanded(
-              child: TextField(
-                controller: _assumedHighestSeqController,
-                keyboardType: TextInputType.number,
-                decoration: const InputDecoration(
-                  labelText: 'Assumed highest sequence we already have',
-                  helperText: 'Blank = simulate an empty database',
-                  isDense: true,
-                  border: OutlineInputBorder(),
-                ),
-                onChanged: (value) {
-                  setState(() {
-                    _assumedHighestSeq = int.tryParse(value.trim());
-                  });
-                },
-              ),
-            ),
-            const SizedBox(width: 8),
-            TextButton(
-              onPressed: () {
-                _assumedHighestSeqController.clear();
-                setState(() => _assumedHighestSeq = null);
-              },
-              child: const Text('Clear'),
-            ),
-          ],
-        ),
-        const SizedBox(height: 4),
         Text(
-          'Applies on the next connect() — reconnect after changing this '
-          'to see a different sync outcome.',
+          'Sync range is now driven by the real readings database — '
+          'the manager queries ReadingsRepository.getHighestSequenceNumber '
+          'on each (re)connect.',
           style: Theme.of(context).textTheme.bodySmall,
         ),
         const SizedBox(height: 12),

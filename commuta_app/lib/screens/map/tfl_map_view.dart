@@ -15,14 +15,17 @@ import 'tfl_map_painter.dart';
 /// and repaints — it no longer owns or mutates the classified-station
 /// state.
 ///
-/// Session 1 (manual override) adds a chip pinned top-centre over the
+/// Session 1 (manual override) added a chip pinned top-centre over the
 /// map. The chip has three visual states:
 ///   • No station tagged — "No station tagged — tap to set"
 ///   • Auto-tagged      — "Tagging: <name>" + auto badge + ✕
 ///   • Manual-tagged    — "Tagging: <name>" + manual badge + ✕
 ///
-/// Auto state renders correctly but can't actually be reached until
-/// Session 2 wires dwell detection into the classification service.
+/// Session 2 wired dwell detection into the classification service, so
+/// the auto state is now reachable: stand within 100 m of a station for
+/// 60 s and the chip flips to auto-tagged without any user action. The
+/// ✕ now calls the generalised `clearStation()` (Session 2, Decision 1),
+/// so clearing works identically for auto and manual tags.
 /// The chip replaces the "Can't detect a TfL station" corner indicator
 /// that was planned for Phase 5 Step 5 — one surface, one state, one
 /// action.
@@ -60,7 +63,7 @@ class _TflMapViewState extends State<TflMapView> {
   }
 
   void _clearTag() {
-    AppServices.instance.classificationService.clearManualStation();
+    AppServices.instance.classificationService.clearStation();
   }
 
   // ── Build ───────────────────────────────────────────────────────────────

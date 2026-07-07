@@ -114,6 +114,25 @@ class ReadingsRepository {
     return row.read(countExp) ?? 0;
   }
 
+  /// Returns the number of readings whose `timestamp` falls within
+  /// `[from, to]` (both bounds inclusive, matching the semantics of
+  /// [getReadingsBetween]).
+  ///
+  /// Used by the CSV export screen to preview how many rows the
+  /// "Today" button will include before the user commits to the
+  /// export. Mirrors the shape of [countAll]: a single SELECT COUNT
+  /// with no row materialisation, so it's cheap to call on every
+  /// screen open.
+  Future<int> countBetween(DateTime from, DateTime to) async {
+    final countExp = _db.readings.id.count();
+    final row =
+        await (_db.selectOnly(_db.readings)
+              ..addColumns([countExp])
+              ..where(_db.readings.timestamp.isBetweenValues(from, to)))
+            .getSingle();
+    return row.read(countExp) ?? 0;
+  }
+
   /// Returns the largest `sequenceNumber` currently in the readings
   /// table, or `null` when the table is empty.
   ///

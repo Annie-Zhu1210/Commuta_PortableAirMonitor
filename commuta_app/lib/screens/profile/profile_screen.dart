@@ -3,13 +3,15 @@ import 'package:flutter/material.dart';
 
 import '../../core/constants/app_colours.dart';
 import '../../dev/ble_dev_harness_screen.dart';
+import 'data_export/data_export_screen.dart';
 import 'device/device_section_screen.dart';
 
 /// Profile tab.
 ///
-/// Scaffolded as a simple sectioned list. Only the Device section is
-/// functional in Step 7b; the Preferences section (Alerts, Account)
-/// is stubbed with "coming soon" tiles so the layout is visible but
+/// Scaffolded as a simple sectioned list. The Device section
+/// (Sensor device) and the Data section (Export data) are both
+/// functional; the Preferences section (Alerts, Account) is
+/// stubbed with "coming soon" tiles so the layout is visible but
 /// the tiles aren't tappable. The Developer section only exists in
 /// debug builds and is where the BLE dev harness now lives after
 /// being demoted from its Step 6 spot on the Home FAB.
@@ -35,6 +37,22 @@ class ProfileScreen extends StatelessWidget {
               onTap: () => Navigator.of(context).push(
                 MaterialPageRoute(
                   builder: (_) => const DeviceSectionScreen(),
+                ),
+              ),
+            ),
+
+            // ── Data ─────────────────────────────────────────────
+            const SizedBox(height: 16),
+            const _SectionHeader('Data'),
+            _ProfileTile(
+              icon: Icons.download_outlined,
+              iconColour: AppColours.accent,
+              title: 'Export data',
+              subtitle:
+                  'Save readings as a CSV to share or open elsewhere.',
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => const DataExportScreen(),
                 ),
               ),
             ),

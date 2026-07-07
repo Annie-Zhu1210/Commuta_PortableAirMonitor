@@ -64,6 +64,28 @@ class DaqiUtils {
     return                   _veryHigh('Very High');
   }
 
+  /// Worst-severity [DaqiBand] across the three particulate matter
+  /// metrics for a single reading.
+  ///
+  /// Higher [DaqiBand.index] means worse air quality, so "worst" is the
+  /// largest of the three individual band indices. Used by the TfL map's
+  /// visited-station colouring (Session 4): each visited station's dot
+  /// is coloured by the worst PM band observed at that station today.
+  ///
+  /// Only PM1, PM2.5 and PM10 count towards the map colour. CO₂,
+  /// temperature, humidity, pressure and the SGP41 indices are
+  /// deliberately excluded — the colour semantically represents
+  /// particulate air quality, not indoor comfort or reactive-gas proxies.
+  static DaqiBand worstPmBand(double pm1, double pm25, double pm10) {
+    final b1  = forPm1(pm1).band;
+    final b25 = forPm25(pm25).band;
+    final b10 = forPm10(pm10).band;
+    var worst = b1;
+    if (b25.index > worst.index) worst = b25;
+    if (b10.index > worst.index) worst = b10;
+    return worst;
+  }
+
   // ───────────────────────── CO₂ (3 bands) ──────────────────────────────────
   // Indoor ventilation guidance — not part of DAQI.
   static DaqiInfo forCo2(double value) {

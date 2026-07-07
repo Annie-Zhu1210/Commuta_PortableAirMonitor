@@ -13,6 +13,22 @@ import '../../data/models/tfl_station.dart';
 /// solid dots), and zoom-aware station labels with multi-anchor
 /// placement and greedy collision avoidance.
 ///
+/// Session 4 (visited-station colouring): the painter accepts a
+/// [visitedStationColours] map keyed by Naptan station ID. For each
+/// entry, the station is treated as "visited today" and its dot is
+/// coloured by the resolved DAQI band colour:
+///   • Non-interchange visited → dot fill replaced with the band colour,
+///     and the dot radius grows from [_singleDotRadius] to
+///     [_singleDotVisitedRadius] so the colour is legible.
+///   • Interchange visited     → existing white-filled ring kept intact,
+///     with the ring stroke recoloured from the default dark stroke to
+///     the band colour. Same radius and stroke width as an unvisited
+///     interchange — only the stroke colour changes.
+/// The classified-station sage halo and visited-station colouring are
+/// orthogonal layers — both can apply to the same station at once
+/// (typical mid-commute: the user is currently at a station that also
+/// has readings from earlier).
+///
 /// Coordinates use a simple equirectangular projection — linear in lat,
 /// and linear in lng with a `cos(midLat)` correction so longitude
 /// degrees have the right on-screen length relative to latitude
@@ -30,6 +46,7 @@ class TflMapPainter extends CustomPainter {
     this.padding = 24.0,
     this.viewScale = 1.0,
     this.classifiedStation,
+    this.visitedStationColours = const {},
   }) : _bounds = _computeBounds(stations),
        _sortedLines = _sortLinesForRendering(lines);
 
@@ -48,11 +65,24 @@ class TflMapPainter extends CustomPainter {
   /// `TflMapData`.
   final TflStation? classifiedStation;
 
+  /// Stations that have collected data today, mapped to the DAQI band
+  /// colour their dot should be painted in (worst PM band observed).
+  /// Empty means no station has data today — nothing extra is drawn.
+  ///
+  /// Resolved from a `ValueNotifier<Map<String, DaqiBand>>` in
+  /// [TflMapView] before being passed in — the painter stays
+  /// decoupled from `DaqiBand` and `AppColours`.
+  final Map<String, Color> visitedStationColours;
+
   final _LatLngBounds _bounds;
   final List<TflLine> _sortedLines;
 
   // === Station dot sizing ===
   static const double _singleDotRadius = 3.0;
+  /// Radius of a non-interchange dot when the station has been visited
+  /// today. Enlarged so the DAQI colour is legible at the default zoom
+  /// (~1.67× the unvisited radius).
+  static const double _singleDotVisitedRadius = 5.0;
   static const double _interchangeRingRadius = 4.0;
   static const double _interchangeRingStrokeWidth = 1.5;
 
@@ -150,11 +180,14 @@ class TflMapPainter extends CustomPainter {
   void _drawStations(Canvas canvas, _Projector projector) {
     final effectiveScale = viewScale > 0.01 ? viewScale : 1.0;
     final singleDotRadius = _singleDotRadius / effectiveScale;
+    final singleDotVisitedRadius = _singleDotVisitedRadius / effectiveScale;
     final ringRadius = _interchangeRingRadius / effectiveScale;
     final ringStrokeWidth = _interchangeRingStrokeWidth / effectiveScale;
     final gap = _labelGap / effectiveScale;
 
-    final dotPaint = Paint()
+    // Reusable Paint objects for the unvisited case. Visited dots build
+    // their own per-colour Paint since the colour differs by station.
+    final defaultDotPaint = Paint()
       ..color = AppColours.textPrimary
       ..style = PaintingStyle.fill
       ..isAntiAlias = true;
@@ -164,7 +197,7 @@ class TflMapPainter extends CustomPainter {
       ..style = PaintingStyle.fill
       ..isAntiAlias = true;
 
-    final ringStrokePaint = Paint()
+    final defaultRingStrokePaint = Paint()
       ..color = AppColours.textPrimary
       ..style = PaintingStyle.stroke
       ..strokeWidth = ringStrokeWidth
@@ -173,11 +206,33 @@ class TflMapPainter extends CustomPainter {
     // Pass 1 — dots.
     for (final station in stations) {
       final pos = projector.project(station.position);
+      final visitedColour = visitedStationColours[station.id];
+
       if (station.isInterchange) {
+        // Interchange: white fill (always), stroke recoloured to the
+        // DAQI band when visited, else the default dark stroke.
         canvas.drawCircle(pos, ringRadius, ringFillPaint);
-        canvas.drawCircle(pos, ringRadius, ringStrokePaint);
+        final strokePaint = visitedColour == null
+            ? defaultRingStrokePaint
+            : (Paint()
+              ..color = visitedColour
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = ringStrokeWidth
+              ..isAntiAlias = true);
+        canvas.drawCircle(pos, ringRadius, strokePaint);
       } else {
-        canvas.drawCircle(pos, singleDotRadius, dotPaint);
+        // Non-interchange: visited dots grow to
+        // [_singleDotVisitedRadius] and take the DAQI colour; unvisited
+        // dots stay small and dark.
+        if (visitedColour == null) {
+          canvas.drawCircle(pos, singleDotRadius, defaultDotPaint);
+        } else {
+          final fillPaint = Paint()
+            ..color = visitedColour
+            ..style = PaintingStyle.fill
+            ..isAntiAlias = true;
+          canvas.drawCircle(pos, singleDotVisitedRadius, fillPaint);
+        }
       }
     }
 
@@ -200,7 +255,9 @@ class TflMapPainter extends CustomPainter {
       return null;
     }
 
-    // Interchanges first, biggest first.
+    // Interchanges first, biggest first. Visited interchanges have the
+    // same footprint as unvisited ones (same radius, only stroke colour
+    // differs), so [ringRadius] applies unconditionally.
     final interchanges = stations.where((s) => s.isInterchange).toList()
       ..sort((a, b) => b.lineIds.length.compareTo(a.lineIds.length));
     for (final station in interchanges) {
@@ -211,12 +268,17 @@ class TflMapPainter extends CustomPainter {
       paintedRects.add(rect);
     }
 
-    // Single-line stations — only above the higher threshold.
+    // Single-line stations — only above the higher threshold. Visited
+    // non-interchanges use the larger [singleDotVisitedRadius] as the
+    // label edge so the label sits outside the enlarged dot.
     if (effectiveScale > _stationLabelMinScale) {
       for (final station in stations) {
         if (station.isInterchange) continue;
         final tp = _getTextPainter(station.displayName);
-        final rect = tryPlace(station, singleDotRadius, tp);
+        final dotEdge = visitedStationColours.containsKey(station.id)
+            ? singleDotVisitedRadius
+            : singleDotRadius;
+        final rect = tryPlace(station, dotEdge, tp);
         if (rect == null) continue;
         _paintLabel(canvas, tp, rect.topLeft, effectiveScale);
         paintedRects.add(rect);
@@ -314,7 +376,8 @@ class TflMapPainter extends CustomPainter {
         oldDelegate.lineStrokeWidth != lineStrokeWidth ||
         oldDelegate.padding != padding ||
         oldDelegate.viewScale != viewScale ||
-        oldDelegate.classifiedStation != classifiedStation;
+        oldDelegate.classifiedStation != classifiedStation ||
+        oldDelegate.visitedStationColours != visitedStationColours;
   }
 }
 

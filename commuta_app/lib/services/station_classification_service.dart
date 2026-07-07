@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart';
 
 import '../core/constants/map_constants.dart';
+import '../core/utils/daqi_utils.dart';
 import '../data/datasources/air_quality_datasource.dart';
 import '../data/models/air_quality_reading.dart';
 import '../data/models/tfl_station.dart';
@@ -24,8 +25,8 @@ import 'tfl_map_data.dart';
 ///     whenever [_currentStationId] is set — manual and auto share the
 ///     same write path
 ///
-/// Phase 5 Step 2 (Session 2, this pass) adds the 100 m / 60 s dwell rule
-/// to [_handlePositionUpdate]:
+/// Phase 5 Step 2 (Session 2) adds the 100 m / 60 s dwell rule to
+/// [_handlePositionUpdate]:
 ///   • Entry: nearest station within
 ///     [MapConstants.stationDwellRadiusMetres] becomes a dwell candidate;
 ///     once the user has stayed on the same candidate for
@@ -42,16 +43,44 @@ import 'tfl_map_data.dart';
 ///     set, the position handler is completely inert (Decision 3) — it
 ///     never mutates state, emits events, or keeps dwell warm.
 ///
+/// Session 4 (visited-station colouring) adds a per-day, per-station
+/// worst-PM-band summary exposed via [visitedStationsToday]. The TfL map
+/// listens to this notifier and colours station dots accordingly:
+///   • On [start], hydrates from the DB by scanning today's classified
+///     readings and taking the worst [DaqiUtils.worstPmBand] per station.
+///   • On each live classified reading, [_handleReading] updates the
+///     entry for the current station if the new reading has a strictly
+///     worse band. The map is monotonic within a day.
+///   • Day rollover is caught by a periodic wall-clock check
+///     ([_startPeriodicDayCheck]) that ticks every 60 s of monotonic
+///     time and asks [_ensureVisitedStateIsForToday] whether the
+///     wall-clock date has advanced. This replaces the earlier one-shot
+///     midnight `Timer` because Dart `Timer` durations are monotonic —
+///     advancing the system clock forward past midnight (or the OS
+///     applying its own clock corrections) would not fire the one-shot
+///     even in the foreground. The periodic check reads
+///     `DateTime.now()` on every tick and rehydrates if the day has
+///     changed. Worst-case visible delay after midnight is 60 s.
+///   • As a belt-and-braces measure, [_handleReading] also fires
+///     [_ensureVisitedStateIsForToday] on every incoming reading before
+///     its stationId-null early return, so a reading arriving shortly
+///     after midnight triggers rehydration immediately regardless of
+///     the periodic tick, and — critically — the check still fires when
+///     no station is currently tagged.
+///
 /// There is no in-memory store of readings here. Every reading is already
 /// persisted to SQLite by [ReadingsRepository] the moment it arrives, and
 /// classified readings have their station written through
 /// [ReadingsRepository.classifyReading]. The database is the single source
-/// of truth; this service only decides *which* station to write.
+/// of truth; this service only decides *which* station to write and
+/// maintains derived views of the classified rows.
 ///
 /// Lifecycle is owned by `AppServices`:
 ///   • [start] runs once at app startup. It subscribes to the shared
 ///     readings stream (no permission needed), so the classification
-///     pathway is live from launch.
+///     pathway is live from launch. Session 4 hydration and the periodic
+///     day-check also kick off here — asynchronously so
+///     `AppServices.init()` isn't blocked on the DB scan.
 ///   • [startLocationTracking] runs once the app has a UI context where a
 ///     permission prompt is acceptable (the main scaffold). It secures
 ///     location permission, loads the TfL station geometry (Decision 6 —
@@ -116,6 +145,55 @@ class StationClassificationService {
   /// fresh fix is available.
   Position? _lastPosition;
 
+  // ── Visited-stations-today state (Session 4) ───────────────────────────
+  // Derived view of the readings table: today's classified rows,
+  // collapsed to the worst PM band per station. Rebuilt on [start], on
+  // day rollover, and updated live on every classified reading.
+
+  /// Mutable backing store keyed by Naptan station ID. Values are the
+  /// worst [DaqiBand] observed at that station today across the three
+  /// PM metrics (see [DaqiUtils.worstPmBand]). Updates are pushed to
+  /// consumers via [_visitedStationsTodayNotifier] as unmodifiable
+  /// snapshots so mutations here can never leak to the UI.
+  final Map<String, DaqiBand> _visitedStationsToday = {};
+
+  /// Immutable snapshot of [_visitedStationsToday] published to the UI.
+  /// `ValueNotifier` fires on reference inequality — each publish
+  /// assigns a fresh unmodifiable Map instance so listeners always see
+  /// the update.
+  final ValueNotifier<Map<String, DaqiBand>> _visitedStationsTodayNotifier =
+      ValueNotifier(const <String, DaqiBand>{});
+
+  /// The local-midnight [DateTime] the current snapshot corresponds to.
+  /// Set at the end of [_hydrateAndMarkToday]; compared against
+  /// `DateTime.now()` in [_ensureVisitedStateIsForToday] to detect day
+  /// rollover regardless of monotonic vs. wall-clock time drift.
+  DateTime? _visitedHydratedFor;
+
+  /// Periodic timer that wakes every
+  /// [_dayCheckIntervalSeconds] seconds of monotonic time and asks
+  /// [_ensureVisitedStateIsForToday] whether the wall-clock date has
+  /// advanced. Rehydrates when it has. This is intentionally a
+  /// `Timer.periodic` rather than a one-shot fired at midnight because
+  /// Dart `Timer` durations are monotonic — a one-shot scheduled at
+  /// 23:55 for "5 minutes from now" doesn't fire if the system clock
+  /// jumps forward past midnight, and doesn't fire reliably across iOS
+  /// backgrounding either. The tick callback is cheap: one `DateTime`
+  /// comparison and an early return when already hydrated for today.
+  Timer? _dayCheckTimer;
+
+  /// Guards against concurrent hydration when [start] races with the
+  /// first live reading, or when several call sites hit the
+  /// day-rollover check within the same rebuild window. Reset in the
+  /// finally block of the caller.
+  Future<void>? _hydrationFuture;
+
+  /// How often the periodic wall-clock day-check ticks. 60 seconds is
+  /// the trade-off between wasted work (the tick body is a two-field
+  /// comparison and early return when hydrated) and the worst-case
+  /// visible delay after midnight (60 s).
+  static const int _dayCheckIntervalSeconds = 60;
+
   /// Read-only view of the currently classified station ID. The TfL map
   /// listens to this to paint (or hide) the halo.
   ValueListenable<String?> get currentStationId => _currentStationId;
@@ -130,6 +208,14 @@ class StationClassificationService {
   /// Callers that need to rebuild on changes should listen to
   /// [manualOverride] instead.
   bool get isManualOverride => _manualOverride.value;
+
+  /// Read-only view of today's visited stations, keyed by Naptan station
+  /// ID, with the worst observed PM band as the value. The TfL map
+  /// listens to this to colour visited-station dots. Empty until
+  /// hydration completes; clears at (or within a minute of) local
+  /// midnight.
+  ValueListenable<Map<String, DaqiBand>> get visitedStationsToday =>
+      _visitedStationsTodayNotifier;
 
   /// Broadcast stream of "entered"/"left" station events.
   ///
@@ -147,9 +233,17 @@ class StationClassificationService {
 
   /// Subscribe to the shared readings stream. No location permission
   /// required. Idempotent — repeat calls are no-ops.
+  ///
+  /// Session 4: also kicks off initial hydration of the
+  /// visited-stations-today snapshot and starts the periodic
+  /// wall-clock day-check. Both operations run asynchronously so
+  /// `AppServices.init()` doesn't block on a DB scan; the map painter
+  /// tolerates an empty snapshot until hydration completes.
   void start() {
     _readingSub ??=
         _dataSource.subscribeToLiveReadings().listen(_handleReading);
+    unawaited(_ensureVisitedStateIsForToday());
+    _startPeriodicDayCheck();
   }
 
   /// Secure location permission, then subscribe to the GPS position
@@ -299,7 +393,19 @@ class StationClassificationService {
   /// Tag an incoming reading to the current station, if one is set.
   /// Runs for both manual and auto tagging paths — the source doesn't
   /// matter, only whether a station is currently set.
+  ///
+  /// Session 4: fires [_ensureVisitedStateIsForToday] at the top —
+  /// before the stationId-null early return — so day rollover is caught
+  /// from the reading stream even when no station is currently tagged.
+  /// The check is cheap when already hydrated (one comparison, one map
+  /// lookup) and complements the periodic wall-clock check for
+  /// immediate response.
   void _handleReading(AirQualityReading reading) {
+    // Session 4: day-rollover check runs unconditionally. Fire-and-
+    // forget; the periodic timer covers the case where no readings
+    // arrive at all (device disconnected, app open but idle).
+    unawaited(_ensureVisitedStateIsForToday());
+
     final stationId = _currentStationId.value;
     if (stationId == null) return;
 
@@ -317,6 +423,11 @@ class StationClassificationService {
           )
           .catchError((Object _) {}),
     );
+
+    // Session 4: update the visited-stations-today snapshot with this
+    // reading's worst PM band. Internally awaits the day-rollover
+    // check so the update lands on the correct day's map.
+    unawaited(_updateVisitedForReading(stationId, reading));
   }
 
   // ── Dwell logic (Session 2) ─────────────────────────────────────────────
@@ -522,6 +633,125 @@ class StationClassificationService {
     _outOfRangeStreak = 0;
   }
 
+  // ── Visited-stations-today logic (Session 4) ────────────────────────────
+
+  /// Ensures the visited-stations-today snapshot reflects today's date.
+  /// Runs a fresh hydration if never hydrated or if a day rollover has
+  /// occurred since the last hydration. Guarded against concurrent
+  /// invocations via [_hydrationFuture] — several call sites can await
+  /// this without triggering duplicate DB scans.
+  Future<void> _ensureVisitedStateIsForToday() async {
+    final existing = _hydrationFuture;
+    if (existing != null) {
+      await existing;
+      return;
+    }
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    if (_visitedHydratedFor == today) return;
+
+    final future = _hydrateAndMarkToday(today);
+    _hydrationFuture = future;
+    try {
+      await future;
+    } finally {
+      _hydrationFuture = null;
+    }
+  }
+
+  /// Hydrates the visited map for [today] and stamps [_visitedHydratedFor]
+  /// so subsequent [_ensureVisitedStateIsForToday] calls short-circuit
+  /// until the wall-clock date advances again.
+  Future<void> _hydrateAndMarkToday(DateTime today) async {
+    await _hydrateVisitedStationsToday();
+    _visitedHydratedFor = today;
+  }
+
+  /// Queries the repository for today's readings, filters to classified
+  /// rows, and rebuilds [_visitedStationsToday] from scratch with the
+  /// worst PM band per station. Publishes a fresh snapshot when done.
+  ///
+  /// On query failure, leaves the map empty and publishes an empty
+  /// snapshot; the next hydration attempt will retry.
+  Future<void> _hydrateVisitedStationsToday() async {
+    final now = DateTime.now();
+    final startOfDay = DateTime(now.year, now.month, now.day);
+
+    _visitedStationsToday.clear();
+
+    final List<AirQualityReading> readings;
+    try {
+      readings =
+          await _readingsRepository.getReadingsBetween(startOfDay, now);
+    } catch (_) {
+      _publishVisitedSnapshot();
+      return;
+    }
+
+    for (final reading in readings) {
+      final stationId = reading.stationId;
+      if (stationId == null) continue;
+      final band = DaqiUtils.worstPmBand(
+        reading.pm1,
+        reading.pm25,
+        reading.pm10,
+      );
+      final current = _visitedStationsToday[stationId];
+      if (current == null || band.index > current.index) {
+        _visitedStationsToday[stationId] = band;
+      }
+    }
+
+    _publishVisitedSnapshot();
+  }
+
+  /// Starts the periodic wall-clock day-check. Cancels any existing
+  /// timer first so repeat [start] calls are safe. See the field
+  /// docstring on [_dayCheckTimer] for the rationale over a one-shot
+  /// midnight timer.
+  void _startPeriodicDayCheck() {
+    _dayCheckTimer?.cancel();
+    _dayCheckTimer = Timer.periodic(
+      const Duration(seconds: _dayCheckIntervalSeconds),
+      (_) => unawaited(_ensureVisitedStateIsForToday()),
+    );
+  }
+
+  /// Updates the visited map for a single live classified reading.
+  /// Ensures the snapshot is for today first (day-rollover check
+  /// awaited here as belt-and-braces alongside the top-of-handler check
+  /// in [_handleReading]).
+  ///
+  /// Only strictly-worse bands cause a publish — same-or-better bands
+  /// leave the map unchanged. The map represents the worst observed
+  /// band across the day, so it's monotonic within a day and updates
+  /// are naturally rare after the first reading at each station.
+  Future<void> _updateVisitedForReading(
+    String stationId,
+    AirQualityReading reading,
+  ) async {
+    await _ensureVisitedStateIsForToday();
+
+    final band = DaqiUtils.worstPmBand(
+      reading.pm1,
+      reading.pm25,
+      reading.pm10,
+    );
+    final current = _visitedStationsToday[stationId];
+    if (current != null && current.index >= band.index) return;
+    _visitedStationsToday[stationId] = band;
+    _publishVisitedSnapshot();
+  }
+
+  /// Replaces the notifier's value with a fresh unmodifiable snapshot of
+  /// [_visitedStationsToday]. `ValueNotifier` fires on reference
+  /// inequality — a new Map instance every publish keeps listeners
+  /// synchronised.
+  void _publishVisitedSnapshot() {
+    _visitedStationsTodayNotifier.value =
+        Map<String, DaqiBand>.unmodifiable(_visitedStationsToday);
+  }
+
   // ── Teardown ────────────────────────────────────────────────────────────
 
   /// Release resources. Called by `AppServices.dispose()`.
@@ -532,9 +762,12 @@ class StationClassificationService {
     _positionSub = null;
     _dwellConfirmTimer?.cancel();
     _dwellConfirmTimer = null;
+    _dayCheckTimer?.cancel();
+    _dayCheckTimer = null;
     await _eventController.close();
     _currentStationId.dispose();
     _manualOverride.dispose();
+    _visitedStationsTodayNotifier.dispose();
   }
 }
 

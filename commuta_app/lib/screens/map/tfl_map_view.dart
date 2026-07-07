@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../core/constants/app_colours.dart';
+import '../../core/utils/daqi_utils.dart';
 import '../../data/models/tfl_station.dart';
 import '../../services/app_services.dart';
 import '../../services/tfl_map_data.dart';
@@ -18,8 +19,8 @@ import 'tfl_map_painter.dart';
 /// Session 1 (manual override) added a chip pinned top-centre over the
 /// map. The chip has three visual states:
 ///   • No station tagged — "No station tagged — tap to set"
-///   • Auto-tagged      — "Tagging: <name>" + auto badge + ✕
-///   • Manual-tagged    — "Tagging: <name>" + manual badge + ✕
+///   • Auto-tagged      — "Tagging: <n>" + auto badge + ✕
+///   • Manual-tagged    — "Tagging: <n>" + manual badge + ✕
 ///
 /// Session 2 wired dwell detection into the classification service, so
 /// the auto state is now reachable: stand within 100 m of a station for
@@ -29,6 +30,16 @@ import 'tfl_map_painter.dart';
 /// The chip replaces the "Can't detect a TfL station" corner indicator
 /// that was planned for Phase 5 Step 5 — one surface, one state, one
 /// action.
+///
+/// Session 4 (visited-station colouring) adds a third notifier to the
+/// paint pipeline: `visitedStationsToday` on the classification service.
+/// The view resolves each visited station's [DaqiBand] into an
+/// [AppColours] value and hands the resulting `Map<String, Color>` to
+/// the painter, which colours non-interchange dots (enlarged) and
+/// recolours the interchange ring stroke. Notifier updates happen as
+/// new classified readings arrive (per-reading, live) and on day
+/// rollover (via a service-side periodic wall-clock check that ticks
+/// every 60 s and rehydrates when the local date has advanced).
 class TflMapView extends StatefulWidget {
   const TflMapView({super.key});
 
@@ -64,6 +75,23 @@ class _TflMapViewState extends State<TflMapView> {
 
   void _clearTag() {
     AppServices.instance.classificationService.clearStation();
+  }
+
+  // ── Band → colour mapping ───────────────────────────────────────────────
+  // Local because it's the only place the map needs it, and keeps the
+  // painter decoupled from `DaqiBand` and `AppColours`.
+
+  static Color _bandColour(DaqiBand band) {
+    switch (band) {
+      case DaqiBand.low:
+        return AppColours.daqiLow;
+      case DaqiBand.moderate:
+        return AppColours.daqiModerate;
+      case DaqiBand.high:
+        return AppColours.daqiHigh;
+      case DaqiBand.veryHigh:
+        return AppColours.daqiVeryHigh;
+    }
   }
 
   // ── Build ───────────────────────────────────────────────────────────────
@@ -155,6 +183,7 @@ class _TflMapViewState extends State<TflMapView> {
     final service = AppServices.instance.classificationService;
     final classifiedStationId = service.currentStationId;
     final manualOverride = service.manualOverride;
+    final visitedStationsToday = service.visitedStationsToday;
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -170,21 +199,34 @@ class _TflMapViewState extends State<TflMapView> {
                 width: constraints.maxWidth,
                 height: constraints.maxHeight,
                 child: AnimatedBuilder(
-                  animation: Listenable.merge(
-                    [_transformController, classifiedStationId],
-                  ),
+                  animation: Listenable.merge([
+                    _transformController,
+                    classifiedStationId,
+                    visitedStationsToday,
+                  ]),
                   builder: (context, _) {
                     final scale =
                         _transformController.value.getMaxScaleOnAxis();
                     final id = classifiedStationId.value;
                     final TflStation? classified =
                         id == null ? null : data.stationById(id);
+
+                    // Session 4: resolve station → band → colour once
+                    // per rebuild. Typical daily size is well under 50
+                    // entries; nothing to optimise here.
+                    final bands = visitedStationsToday.value;
+                    final visitedColours = <String, Color>{
+                      for (final entry in bands.entries)
+                        entry.key: _bandColour(entry.value),
+                    };
+
                     return CustomPaint(
                       painter: TflMapPainter(
                         lines: data.lines,
                         stations: data.stations,
                         viewScale: scale,
                         classifiedStation: classified,
+                        visitedStationColours: visitedColours,
                       ),
                     );
                   },

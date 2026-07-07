@@ -106,6 +106,39 @@ class ReadingsRepository {
     return rows.map(_fromRow).toList();
   }
 
+  /// Returns all classified readings for [stationId] whose timestamp
+  /// falls on [day] in local time, ordered ascending by timestamp.
+  ///
+  /// The date range is `[localMidnight(day), localMidnight(day + 1))`
+  /// — half-open, so a reading at exactly 00:00:00 of the next day
+  /// falls into that day rather than being double-counted. The
+  /// upper-bound `day + 1` is built via `DateTime(y, m, d + 1)` rather
+  /// than `.add(Duration(days: 1))` so DST transitions (March/October
+  /// in London) don't drift the boundary by an hour.
+  ///
+  /// Used by the TfL map's station-tap flow (Session 5) to populate
+  /// the reading floating window with today's readings for the tapped
+  /// station. If Session 7's historical-chart screen ever adds
+  /// per-station filters, this is the query to reuse.
+  Future<List<AirQualityReading>> getReadingsForStationOnDate(
+    String stationId,
+    DateTime day,
+  ) async {
+    final start = DateTime(day.year, day.month, day.day);
+    final end = DateTime(day.year, day.month, day.day + 1);
+    final rows =
+        await (_db.select(_db.readings)
+              ..where(
+                (t) =>
+                    t.stationId.equals(stationId) &
+                    t.timestamp.isBiggerOrEqualValue(start) &
+                    t.timestamp.isSmallerThanValue(end),
+              )
+              ..orderBy([(t) => OrderingTerm.asc(t.timestamp)]))
+            .get();
+    return rows.map(_fromRow).toList();
+  }
+
   Future<int> countAll() async {
     final countExp = _db.readings.id.count();
     final row = await (_db.selectOnly(

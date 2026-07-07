@@ -38,16 +38,23 @@ import '../../data/models/tfl_station.dart';
 /// [InteractiveViewer]; the painter divides all on-screen dimensions
 /// (stroke width, dot radius, halo radius, label gap) by it so the
 /// rendered sizes stay constant regardless of zoom.
+///
+/// Session 5 (station tap → timestamp list → reading detail):
+/// [TflMapProjector] and [TflMapBounds] were pulled out from the
+/// painter's private [_Projector] / `_LatLngBounds` types so the
+/// [TflMapView] can reconstruct the same projection at tap time and
+/// hit-test station dots without duplicating the projection maths.
+/// The painter's internal usage is unchanged.
 class TflMapPainter extends CustomPainter {
   TflMapPainter({
     required this.lines,
     required this.stations,
     this.lineStrokeWidth = 2.5,
-    this.padding = 24.0,
+    this.padding = defaultPadding,
     this.viewScale = 1.0,
     this.classifiedStation,
     this.visitedStationColours = const {},
-  }) : _bounds = _computeBounds(stations),
+  }) : _bounds = TflMapBounds.forStations(stations),
        _sortedLines = _sortLinesForRendering(lines);
 
   final List<TflLine> lines;
@@ -74,8 +81,14 @@ class TflMapPainter extends CustomPainter {
   /// decoupled from `DaqiBand` and `AppColours`.
   final Map<String, Color> visitedStationColours;
 
-  final _LatLngBounds _bounds;
+  final TflMapBounds _bounds;
   final List<TflLine> _sortedLines;
+
+  /// Default outer padding (in canvas units at `viewScale == 1`)
+  /// between the station bounding box and the widget edge. Exposed
+  /// as a `static const` so [TflMapView]'s hit-test can construct a
+  /// [TflMapProjector] with the same padding the painter uses.
+  static const double defaultPadding = 24.0;
 
   // === Station dot sizing ===
   static const double _singleDotRadius = 3.0;
@@ -120,14 +133,18 @@ class TflMapPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     if (stations.isEmpty || _sortedLines.isEmpty) return;
 
-    final projector = _Projector(bounds: _bounds, size: size, padding: padding);
+    final projector = TflMapProjector(
+      bounds: _bounds,
+      size: size,
+      padding: padding,
+    );
 
     _drawLines(canvas, projector);
     _drawHalo(canvas, projector);
     _drawStations(canvas, projector);
   }
 
-  void _drawLines(Canvas canvas, _Projector projector) {
+  void _drawLines(Canvas canvas, TflMapProjector projector) {
     final effectiveStrokeWidth =
         lineStrokeWidth / (viewScale > 0.01 ? viewScale : 1.0);
 
@@ -157,7 +174,7 @@ class TflMapPainter extends CustomPainter {
   /// Paints a single sage circle behind the classified station's dot.
   /// No-op when [classifiedStation] is null. Constant size on screen
   /// (radius divided by [viewScale], matching the rest of the painter).
-  void _drawHalo(Canvas canvas, _Projector projector) {
+  void _drawHalo(Canvas canvas, TflMapProjector projector) {
     final station = classifiedStation;
     if (station == null) return;
 
@@ -177,7 +194,7 @@ class TflMapPainter extends CustomPainter {
     canvas.drawCircle(centre, radius, paint);
   }
 
-  void _drawStations(Canvas canvas, _Projector projector) {
+  void _drawStations(Canvas canvas, TflMapProjector projector) {
     final effectiveScale = viewScale > 0.01 ? viewScale : 1.0;
     final singleDotRadius = _singleDotRadius / effectiveScale;
     final singleDotVisitedRadius = _singleDotVisitedRadius / effectiveScale;
@@ -350,9 +367,40 @@ class TflMapPainter extends CustomPainter {
     return [for (final entry in indexed) entry.$2];
   }
 
-  static _LatLngBounds _computeBounds(List<TflStation> stations) {
+  @override
+  bool shouldRepaint(covariant TflMapPainter oldDelegate) {
+    return oldDelegate.lines != lines ||
+        oldDelegate.stations != stations ||
+        oldDelegate.lineStrokeWidth != lineStrokeWidth ||
+        oldDelegate.padding != padding ||
+        oldDelegate.viewScale != viewScale ||
+        oldDelegate.classifiedStation != classifiedStation ||
+        oldDelegate.visitedStationColours != visitedStationColours;
+  }
+}
+
+/// Axis-aligned geographic bounding box in degrees (WGS84).
+///
+/// Session 5: promoted from the painter-private `_LatLngBounds` so
+/// [TflMapView] can reconstruct the exact same projection at tap time
+/// and hit-test against the projected station positions. The painter's
+/// use of it is unchanged.
+class TflMapBounds {
+  const TflMapBounds(this.minLat, this.maxLat, this.minLng, this.maxLng);
+
+  final double minLat;
+  final double maxLat;
+  final double minLng;
+  final double maxLng;
+
+  /// Convenience constructor: computes the tight axis-aligned bounding
+  /// box over [stations]. Returns `TflMapBounds(0, 0, 0, 0)` when the
+  /// input is empty, matching the painter's prior behaviour — an empty
+  /// stations list means the painter early-returns from `paint()` and
+  /// the projector is never actually queried.
+  factory TflMapBounds.forStations(List<TflStation> stations) {
     if (stations.isEmpty) {
-      return const _LatLngBounds(0, 0, 0, 0);
+      return const TflMapBounds(0, 0, 0, 0);
     }
     var minLat = stations.first.position.latitude;
     var maxLat = minLat;
@@ -366,32 +414,27 @@ class TflMapPainter extends CustomPainter {
       if (lng < minLng) minLng = lng;
       if (lng > maxLng) maxLng = lng;
     }
-    return _LatLngBounds(minLat, maxLat, minLng, maxLng);
-  }
-
-  @override
-  bool shouldRepaint(covariant TflMapPainter oldDelegate) {
-    return oldDelegate.lines != lines ||
-        oldDelegate.stations != stations ||
-        oldDelegate.lineStrokeWidth != lineStrokeWidth ||
-        oldDelegate.padding != padding ||
-        oldDelegate.viewScale != viewScale ||
-        oldDelegate.classifiedStation != classifiedStation ||
-        oldDelegate.visitedStationColours != visitedStationColours;
+    return TflMapBounds(minLat, maxLat, minLng, maxLng);
   }
 }
 
-class _LatLngBounds {
-  const _LatLngBounds(this.minLat, this.maxLat, this.minLng, this.maxLng);
-  final double minLat;
-  final double maxLat;
-  final double minLng;
-  final double maxLng;
-}
-
-class _Projector {
-  _Projector({
-    required _LatLngBounds bounds,
+/// Equirectangular geographic → canvas projection used by the TfL map.
+///
+/// Linear in latitude, and linear in longitude with a `cos(midLat)`
+/// correction so a degree of longitude has the correct on-screen
+/// length relative to a degree of latitude at London's latitude.
+/// The projection preserves aspect ratio and centres the map inside
+/// [size] with [padding] on each edge.
+///
+/// Session 5: promoted from the painter-private `_Projector` so
+/// [TflMapView] can construct an identical projector at tap-handling
+/// time to convert station positions to canvas coordinates for
+/// hit-testing. The painter's use of it (via `TflMapPainter.paint`)
+/// is unchanged — same construction arguments, same `project(LatLng)`
+/// behaviour.
+class TflMapProjector {
+  TflMapProjector({
+    required TflMapBounds bounds,
     required Size size,
     required double padding,
   }) : _bounds = bounds,
@@ -418,12 +461,15 @@ class _Projector {
     _offsetY = (size.height - projectedHeight * _scale) / 2;
   }
 
-  final _LatLngBounds _bounds;
+  final TflMapBounds _bounds;
   final double _lngScale;
   late final double _scale;
   late final double _offsetX;
   late final double _offsetY;
 
+  /// Project a geographic [LatLng] to a canvas offset. Y is flipped
+  /// so increasing latitude moves upward on the canvas even though
+  /// canvas y grows downward.
   Offset project(LatLng point) {
     final x =
         (point.longitude - _bounds.minLng) * _lngScale * _scale + _offsetX;

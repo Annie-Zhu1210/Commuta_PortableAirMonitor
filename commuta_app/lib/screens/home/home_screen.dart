@@ -4,6 +4,7 @@ import '../../core/utils/daqi_utils.dart';
 import '../../services/app_services.dart';
 import '../../data/datasources/air_quality_datasource.dart';
 import '../../data/models/air_quality_reading.dart';
+import '../../widgets/hero_aqi_card.dart';
 import '../../widgets/metric_card.dart';
 import '../../widgets/metric_info_sheet.dart';
 
@@ -81,8 +82,8 @@ class _HomeScreenState extends State<HomeScreen> {
             padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
             sliver: SliverList(
               delegate: SliverChildListDelegate([
-                // ── Hero card: Overall Air Quality (Annie's custom score) ──
-                _OverallAirQualityCard(lastUpdated: reading.timestamp),
+                // ── Hero card: Overall Air Quality (Plan 2 score) ────────
+                HeroAqiCard(reading: reading),
 
                 const SizedBox(height: 20),
 
@@ -145,100 +146,6 @@ class _HomeScreenState extends State<HomeScreen> {
   void _showApiInfoSheet({required String label, required String unit}) {
     // API-driven cards have no live device data — no dataSource/extractor passed.
     MetricInfoSheet.show(context, metricLabel: label, unit: unit);
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Hero card: Overall Air Quality (custom score, future work)
-// ─────────────────────────────────────────────────────────────────────────────
-
-class _OverallAirQualityCard extends StatelessWidget {
-  final DateTime lastUpdated;
-
-  const _OverallAirQualityCard({required this.lastUpdated});
-
-  String _formatTime(DateTime dt) {
-    final h = dt.hour.toString().padLeft(2, '0');
-    final m = dt.minute.toString().padLeft(2, '0');
-    return '$h:$m';
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(24),
-      decoration: BoxDecoration(
-        color: AppColours.surface,
-        borderRadius: BorderRadius.circular(20),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.07),
-            blurRadius: 12,
-            offset: const Offset(0, 3),
-          ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // ── Title ─────────────────────────────────────────────────────────
-          Row(
-            children: [
-              const Text(
-                'Overall Air Quality',
-                style: TextStyle(
-                  fontSize: 17,
-                  fontWeight: FontWeight.w700,
-                  color: AppColours.textPrimary,
-                  letterSpacing: 0.1,
-                ),
-              ),
-              const Spacer(),
-              Text(
-                'Updated ${_formatTime(lastUpdated)}',
-                style: const TextStyle(
-                  fontSize: 11,
-                  color: AppColours.textSecondary,
-                ),
-              ),
-            ],
-          ),
-
-          const SizedBox(height: 32),
-
-          // ── Placeholder: custom score (Annie's future algorithm) ─────────
-          // TODO: Replace this placeholder with Annie's custom commuter-weighted
-          //       air-quality score once the algorithm is designed.
-          Center(
-            child: Column(
-              children: [
-                Text(
-                  '—',
-                  style: TextStyle(
-                    fontSize: 48,
-                    fontWeight: FontWeight.w300,
-                    color: AppColours.textSecondary.withValues(alpha: 0.6),
-                    height: 1.0,
-                  ),
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  'Custom score coming soon',
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: AppColours.textSecondary.withValues(alpha: 0.8),
-                    fontStyle: FontStyle.italic,
-                  ),
-                ),
-              ],
-            ),
-          ),
-
-          const SizedBox(height: 24),
-        ],
-      ),
-    );
   }
 }
 

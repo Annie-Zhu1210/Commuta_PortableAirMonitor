@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:drift/drift.dart';
 
 import '../data/database/app_database.dart';
 import '../data/datasources/air_quality_datasource.dart';
@@ -101,6 +102,7 @@ class AppServices {
     // ── Database ─────────────────────────────────────────────────
     database = AppDatabase();
 
+
     // ── One-shot clear of pre-cutover mock rows ──────────────────
     // First launch after the BLE cutover deletes every row whose
     // sourceFlag is 'mock', so buffered sync starts from a truly-
@@ -110,8 +112,7 @@ class AppServices {
     // the code indefinitely.
     final prefs = await SharedPreferences.getInstance();
     if (!(prefs.getBool(_mockReadingsClearedKey) ?? false)) {
-      final removed =
-          await database.deleteReadingsWhereSourceFlag('mock');
+      final removed = await database.deleteReadingsWhereSourceFlag('mock');
       debugPrint(
         '[AppServices] Cutover mock-clear: removed $removed row(s) '
         "where sourceFlag = 'mock'.",
@@ -154,13 +155,14 @@ class AppServices {
     // Wired after the manager is available so the service can hook
     // onto the manager's `lastSeenListenable` and `statusStream`
     // straight away. Reuses the `prefs` instance opened above.
-    devicePersistence =
-        DevicePersistenceService(prefs, deviceConnection);
+    devicePersistence = DevicePersistenceService(prefs, deviceConnection);
     devicePersistence.start();
 
     // ── Classification service ───────────────────────────────────
-    classificationService =
-        StationClassificationService(dataSource, readingsRepository);
+    classificationService = StationClassificationService(
+      dataSource,
+      readingsRepository,
+    );
     classificationService.start();
     // Note: startLocationTracking() is deliberately NOT called here.
     // Location permission must not be requested in main() before any

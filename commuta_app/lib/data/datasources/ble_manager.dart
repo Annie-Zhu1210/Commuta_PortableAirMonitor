@@ -110,12 +110,16 @@ class BufferedSyncProgress {
 /// (`Commuta_code.ino` resumes from flash), so sequence numbers alone
 /// don't reveal reboots — but `uptimeSeconds` in the Status packet
 /// bounds how far back the current power session can reach. Gap
-/// detection therefore floors at
-/// `newest_buffered_seq − uptime/10 − margin`: anything older is on
-/// flash but cannot be correctly time-stamped (the power-off duration
-/// between sessions is unknown), so it is logged once as unrecoverable
-/// and never requested. Silent mis-timestamping would corrupt station
-/// classification, which is worse than an honest gap.
+/// detection therefore floors at `newest_buffered_seq − uptime/10`,
+/// biased one sample upward so boot-time warm-up and Status staleness
+/// can never let the floor slip into the previous power session
+/// (Amendment A: the floor must never reach across a reboot, even at
+/// the cost of stranding one honest in-session reading per reboot).
+/// Anything below the floor is on flash but cannot be correctly
+/// time-stamped (the power-off duration between sessions is unknown),
+/// so it is skipped and never requested. Silent mis-timestamping
+/// would corrupt station classification, which is worse than an
+/// honest gap.
 ///
 /// Duplicate safety: the DB's unique key is `(sequenceNumber,
 /// timestamp)` and reconstructed timestamps carry per-anchor jitter,
@@ -178,17 +182,16 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
   /// cap are simply re-detected and healed on the next reconnect.
   static const int maxGapRangesPerSession = 10;
 
-  /// Margin applied on both sides of the power-session boundary
-  /// (revised Decision 2). Subtracted from the DB-query cutoff so
-  /// rows written just around the session start aren't wrongly
-  /// excluded, and widened into [_eraMarginSamples] when computing
-  /// the gap floor. Sixty seconds comfortably covers Status-packet
+  /// Margin applied to the DB-query cutoff only (revised Decision 2,
+  /// Amendment A). Subtracted from the power-session start when
+  /// querying which sequences are already held, so rows written just
+  /// around the boundary aren't wrongly excluded and re-requested.
+  /// Deliberately NOT applied to the gap floor: widening the floor
+  /// downward once let it reach across a reboot and refetch
+  /// previous-session records with cross-reboot (i.e. wrong)
+  /// timestamps. Sixty seconds comfortably covers Status-packet
   /// latency, uptime's one-second resolution, and clock jitter.
   static const Duration _eraMargin = Duration(seconds: 60);
-
-  /// [_eraMargin] expressed in sample counts at the 10-second
-  /// cadence: 60 s ÷ 10 s = 6 samples.
-  static const int _eraMarginSamples = 6;
 
   /// Tolerance used by the firmware-reset backstop (Decision 4A
   /// retained). The freshest Status snapshot can be up to one 10 s
@@ -940,20 +943,25 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
       return;
     }
 
-    // ── Power-session scoping (revised Decision 2) ──────────────────
+    // ── Power-session scoping (revised Decision 2, Amendment A) ─────
     // The current power session began `uptime` seconds before the
     // Status snapshot was received. The DB query cutoff sits an
-    // [_eraMargin] earlier so boundary rows aren't wrongly excluded,
-    // and the gap floor mirrors the same bound in sequence space:
-    // the session cannot have produced more than uptime/10 samples
-    // (plus margin), so anything below `newest − that` predates the
-    // last reboot and cannot be correctly time-stamped.
+    // [_eraMargin] earlier so boundary rows aren't wrongly excluded.
+    // The gap floor mirrors the bound in sequence space — the session
+    // cannot have produced more than uptime/10 samples — and is
+    // biased ONE SAMPLE UPWARD: integer truncation, boot-time sensor
+    // warm-up, and Status staleness must never let the floor slip
+    // into the previous power session, whose readings cannot be
+    // correctly time-stamped. Worst case this strands one honest
+    // in-session reading per reboot, which is the right trade for a
+    // research instrument.
     final sessionCutoff = status.receivedAt
         .subtract(Duration(seconds: status.uptimeSeconds))
         .subtract(_eraMargin);
     final samplesThisPowerSession =
-        (status.uptimeSeconds ~/ _samplingIntervalSecInt) + _eraMarginSamples;
-    int floorFromUptime = status.newestBufferedSeq - samplesThisPowerSession;
+        status.uptimeSeconds ~/ _samplingIntervalSecInt;
+    int floorFromUptime =
+        status.newestBufferedSeq - samplesThisPowerSession + 1;
     if (floorFromUptime < 0) floorFromUptime = 0;
     final gapFloor = floorFromUptime > status.oldestBufferedSeq
         ? floorFromUptime
@@ -1020,25 +1028,25 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
       return;
     }
 
-    // ── Unrecoverable readings below the floor (Decision 5) ─────────
-    // Once per session: count flash records that exist on the device
-    // but predate the current power session. They cannot be correctly
-    // time-stamped (unknown power-off duration), so they are never
-    // requested — an honest gap beats silent mis-timestamping.
+    // ── Skipped span below the floor (Decision 5, reworded) ─────────
+    // Once per session: flash records below the floor predate the
+    // current power session and cannot be correctly time-stamped
+    // (unknown power-off duration), so they are never requested — an
+    // honest gap beats silent mis-timestamping. The log reports the
+    // skipped span rather than a count: the power-session-scoped
+    // `held` query cannot distinguish already-synced rows from
+    // never-synced ones below the cutoff, so any count here would
+    // overstate the loss (most of the span is usually safe in the DB
+    // from previous sessions' syncs).
     if (!_unrecoverableLoggedThisSession &&
         gapFloor > status.oldestBufferedSeq) {
-      var unrecoverable = 0;
-      for (var s = status.oldestBufferedSeq; s < gapFloor; s++) {
-        if (!held.contains(s)) unrecoverable++;
-      }
-      if (unrecoverable > 0) {
-        debugPrint(
-          '[BLEManager] Sync: $unrecoverable reading(s) in '
-          '[${status.oldestBufferedSeq}..${gapFloor - 1}] predate the '
-          'current power session and cannot be time-stamped; leaving '
-          'them on the device (unrecoverable, Decision 5).',
-        );
-      }
+      debugPrint(
+        '[BLEManager] Sync: sequences '
+        '[${status.oldestBufferedSeq}..${gapFloor - 1}] predate the '
+        'current power session; skipping (already-synced rows are '
+        'unaffected; anything never synced in that span is '
+        'unrecoverable, Decision 5).',
+      );
       _unrecoverableLoggedThisSession = true;
     }
 

@@ -166,28 +166,39 @@ class ReadingsRepository {
     return row.read(countExp) ?? 0;
   }
 
-  /// Returns the largest `sequenceNumber` currently in the readings
-  /// table, or `null` when the table is empty.
+  /// Returns the sorted distinct `sequenceNumber`s of every reading
+  /// whose `timestamp` is at or after [since]. Empty list when no
+  /// rows match.
   ///
-  /// Used by `BLEManager` on `connected` (after the first Live and
-  /// first Status notifications have landed) to decide whether a
-  /// buffered catch-up sync is needed. A `null` return means "empty
-  /// DB, sync everything the device has"; otherwise the manager
-  /// requests the range `[result + 1 .. 0xFFFFFFFF]`.
+  /// Used by `BLEManager`'s gap-aware sync (Direction 1 rework):
+  /// [since] is the start of the device's current power session
+  /// (derived from the Status packet's `uptimeSeconds`, minus a small
+  /// margin), so the returned set represents exactly the sequences
+  /// whose numbering is comparable with the device's current counter.
+  /// The manager scans this set (unioned with its in-memory
+  /// received-this-session set) for holes and requests only the
+  /// missing ranges — never re-requesting a held record, because the
+  /// unique key `(sequenceNumber, timestamp)` cannot dedupe
+  /// re-reconstructed timestamps that carry per-anchor jitter.
   ///
-  /// Note: on firmware reset the device restarts its sequence counter,
-  /// so a device `newest_buffered_seq` lower than this value doesn't
-  /// necessarily mean the buffer is stale — the two "eras" of
-  /// sequence numbers coexist in the DB, distinguished by their
-  /// timestamps. Per Decision 4A of the Step 6 architecture review,
-  /// `BLEManager` skips sync in that case rather than attempting a
-  /// full-range refetch.
-  Future<int?> getHighestSequenceNumber() async {
-    final maxExp = _db.readings.sequenceNumber.max();
-    final row = await (_db.selectOnly(
-      _db.readings,
-    )..addColumns([maxExp])).getSingle();
-    return row.read(maxExp);
+  /// Rows older than [since] — previous power sessions, or a previous
+  /// numbering era after a flash wipe — are deliberately invisible to
+  /// gap detection: their sequence numbers must not mask (or fake)
+  /// gaps in the current session's numbering.
+  ///
+  /// Cost: one indexed range scan returning at most one `int` per
+  /// distinct sequence in the window (bounded by the device's flash
+  /// capacity, ≤ 25 600), well within budget for a once-per-connect
+  /// query.
+  Future<List<int>> getSequenceNumbersSince(DateTime since) async {
+    final seqCol = _db.readings.sequenceNumber;
+    final rows =
+        await (_db.selectOnly(_db.readings, distinct: true)
+              ..addColumns([seqCol])
+              ..where(_db.readings.timestamp.isBiggerOrEqualValue(since))
+              ..orderBy([OrderingTerm.asc(seqCol)]))
+            .get();
+    return rows.map((r) => r.read(seqCol)!).toList(growable: false);
   }
 
   /// Release resources. Called by `AppServices.dispose()`.

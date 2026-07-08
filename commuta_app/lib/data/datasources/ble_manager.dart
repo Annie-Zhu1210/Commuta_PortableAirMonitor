@@ -55,10 +55,11 @@ class BufferedSyncProgress {
   /// across every resume attempt in this session.
   final int recordsReceived;
 
-  /// Best guess at the total records to be sent, computed at first
-  /// sync start as `newestBufferedSeq − startSeq + 1`. Approximate —
-  /// the device may clamp the range, and buffered records don't
-  /// necessarily occupy every integer sequence value.
+  /// Total records the whole session is expected to transfer,
+  /// computed at the first gap scan as the count of missing sequence
+  /// numbers within the current power session. Preserved across
+  /// ranges and resume attempts. Approximate only in that new records
+  /// buffered while syncing may ride along on the final range.
   final int? expectedTotal;
 
   /// `sent_count` field of the EOS frame. Populated on successful
@@ -88,23 +89,53 @@ class BufferedSyncProgress {
 
 /// Real BLE implementation of [AirQualityDataSource] and [DeviceConnection].
 ///
-/// See BLE_Integration_Plan.md for the full context. Step 6 adds the
-/// catch-up sync protocol: on `connected`, once both a first Live
-/// packet (anchor set) and a first Status packet (`newest_buffered_seq`
-/// known) have landed, the manager decides whether to request the
-/// device's flash buffer. Records arriving on the Buffered
-/// characteristic are time-stamped by projecting backwards from the
-/// most recent live-arrival anchor and emitted on the buffered-only
-/// stream so UI surfaces showing "current reading" are not disturbed.
+/// See BLE_Integration_Plan.md for the original Step 6 context. The
+/// gap-aware sync session (Direction 1 rework) replaces the old
+/// "highest sequence" catch-up: on `connected`, once both a first Live
+/// packet (anchor set) and a first Status packet (buffer range known)
+/// have landed, the manager scans for *holes* in its own database —
+/// sequence numbers within the device's current power session that it
+/// does not hold — and requests each missing contiguous range from the
+/// device's flash buffer, one range at a time, looping after each EOS
+/// until no gaps remain (or [maxGapRangesPerSession] is hit). Records
+/// arriving on the Buffered characteristic are time-stamped by
+/// projecting backwards from the most recent live-arrival anchor and
+/// emitted on the buffered-only stream so UI surfaces showing "current
+/// reading" are not disturbed.
+///
+/// Power-session scoping (revised Decision 2): buffered timestamps are
+/// reconstructed by counting 10-second ticks back from the live
+/// anchor, which is only valid while the device has been continuously
+/// powered. The firmware persists its sequence counter across reboots
+/// (`Commuta_code.ino` resumes from flash), so sequence numbers alone
+/// don't reveal reboots — but `uptimeSeconds` in the Status packet
+/// bounds how far back the current power session can reach. Gap
+/// detection therefore floors at
+/// `newest_buffered_seq − uptime/10 − margin`: anything older is on
+/// flash but cannot be correctly time-stamped (the power-off duration
+/// between sessions is unknown), so it is logged once as unrecoverable
+/// and never requested. Silent mis-timestamping would corrupt station
+/// classification, which is worse than an honest gap.
+///
+/// Duplicate safety: the DB's unique key is `(sequenceNumber,
+/// timestamp)` and reconstructed timestamps carry per-anchor jitter,
+/// so re-requesting a record we already hold would insert a near-
+/// duplicate row rather than conflict. The manager therefore only ever
+/// requests sequences it is certain it lacks: the DB query is unioned
+/// with [_sessionSeqs], an in-memory set of every sequence received
+/// this session (live *and* buffered), which closes the write-vs-query
+/// races on the freshly arrived live packet and on rows still in
+/// flight to the repository when a range's EOS triggers the next scan.
 ///
 /// Auto-resume: if the buffered stream goes silent for
 /// [_syncHeartbeatTimeout] before EOS arrives (usually because the
 /// firmware's outgoing notification queue back-pressured a frame we
 /// never see the retry of), the manager writes a fresh sync request
-/// starting from just after the last record it did receive, up to
-/// [syncMaxAttempts] times per session before giving up. This makes the
-/// phone side robust to firmware-side drops even if the firmware fix
-/// isn't perfect.
+/// starting from just after the last record it did receive — bounded
+/// by the current range's end so an interior-gap resume can never
+/// over-fetch records above the gap — up to [syncMaxAttempts] times
+/// per range before giving up for the session. Remaining gaps are
+/// re-detected and healed on the next reconnect.
 class BLEManager implements AirQualityDataSource, DeviceConnection {
   static const String _prefsKey = 'commuta_paired_peripheral_id';
 
@@ -131,13 +162,42 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
   /// exhausted) or gives up for the session.
   static const Duration _syncHeartbeatTimeout = Duration(seconds: 30);
 
-  /// Maximum number of sync attempts per connection session. Each
+  /// Maximum number of sync attempts per requested gap range. Each
   /// attempt gets its own [_syncHeartbeatTimeout] window; on timeout,
   /// the manager writes a fresh sync request starting from just after
-  /// the highest sequence received across any prior attempt. Chosen at
-  /// 3 to bound wasted airtime while still recovering from a couple of
-  /// transient firmware drops.
+  /// the highest sequence received across any prior attempt of the
+  /// same range. Chosen at 3 to bound wasted airtime while still
+  /// recovering from a couple of transient firmware drops. The counter
+  /// resets to 1 whenever a new range is requested.
   static const int syncMaxAttempts = 3;
+
+  /// Safety cap on the number of gap ranges requested per connection
+  /// session (Decision 3). Real journeys produce one gap (the
+  /// app-closed window), occasionally two or three; a session that
+  /// somehow needs more is pathological, and any ranges beyond the
+  /// cap are simply re-detected and healed on the next reconnect.
+  static const int maxGapRangesPerSession = 10;
+
+  /// Margin applied on both sides of the power-session boundary
+  /// (revised Decision 2). Subtracted from the DB-query cutoff so
+  /// rows written just around the session start aren't wrongly
+  /// excluded, and widened into [_eraMarginSamples] when computing
+  /// the gap floor. Sixty seconds comfortably covers Status-packet
+  /// latency, uptime's one-second resolution, and clock jitter.
+  static const Duration _eraMargin = Duration(seconds: 60);
+
+  /// [_eraMargin] expressed in sample counts at the 10-second
+  /// cadence: 60 s ÷ 10 s = 6 samples.
+  static const int _eraMarginSamples = 6;
+
+  /// Tolerance used by the firmware-reset backstop (Decision 4A
+  /// retained). The freshest Status snapshot can be up to one 10 s
+  /// interval stale, so a live sequence one or two above
+  /// `newest_buffered_seq` is normal; a held sequence *more* than
+  /// this many above it means the flash was wiped and renumbering
+  /// restarted very recently — sync is skipped for the session with
+  /// advice to clear the DB via the dev action.
+  static const int _resetToleranceSamples = 6;
 
   bool _started = false;
   DeviceConnectionState _currentState = DeviceConnectionState.idle;
@@ -202,13 +262,48 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
 
   // ── Sync state (all cleared in _teardownConnection) ────────────────────
 
-  /// Provides the largest `sequenceNumber` currently in the readings
-  /// DB (or null if empty). Wired in by `AppServices` in Step 7 as
-  /// `bleManager.highestSequenceProvider = repo.getHighestSequenceNumber`.
-  /// If left null (e.g. the dev harness didn't wire it), sync is
-  /// skipped with a diagnostic log and the connection continues to
-  /// deliver Live readings normally.
-  Future<int?> Function()? highestSequenceProvider;
+  /// Provides the sorted distinct `sequenceNumber`s currently in the
+  /// readings DB whose `timestamp` is at or after the supplied cutoff
+  /// (the current power-session start, minus [_eraMargin]). Wired in
+  /// by `AppServices` as `bleManager.eraSequenceNumbersProvider =
+  /// repo.getSequenceNumbersSince`. If left null (e.g. the dev
+  /// harness didn't wire it), sync is skipped with a diagnostic log
+  /// and the connection continues to deliver Live readings normally.
+  Future<List<int>> Function(DateTime since)? eraSequenceNumbersProvider;
+
+  /// Every sequence number received over BLE this session — live and
+  /// buffered alike. Unioned with the DB query during gap detection
+  /// so a record whose repository write hasn't committed yet can
+  /// never be mistaken for a gap and re-requested (which would insert
+  /// a near-duplicate row, since reconstructed timestamps carry
+  /// per-anchor jitter and the unique key is `(seq, timestamp)`).
+  /// Bounded by the flash capacity (≤ 25 600 buffered records) plus
+  /// one live entry per 10 s, so memory is trivial. Cleared in
+  /// `_teardownConnection`.
+  final Set<int> _sessionSeqs = <int>{};
+
+  /// Gap ranges requested so far this session, compared against
+  /// [maxGapRangesPerSession] before each new request.
+  int _gapRangesRequested = 0;
+
+  /// Records received within the current range (across its resume
+  /// attempts). Used for the per-range EOS reconciliation warning;
+  /// [_recordsReceivedThisSync] keeps the whole-session total.
+  int _recordsReceivedThisRange = 0;
+
+  /// Whether the once-per-session "unrecoverable readings" log for
+  /// pre-power-session flash records has already been emitted
+  /// (Decision 5).
+  bool _unrecoverableLoggedThisSession = false;
+
+  /// Accumulated EOS `sent_count` across every completed range this
+  /// session, published in the final [BufferedSyncProgress].
+  int _sentCountTotal = 0;
+
+  /// Session-wide lowest `first_sent` / highest `last_sent` across
+  /// range EOS frames, for the final progress snapshot.
+  int? _sessionFirstSentSeq;
+  int? _sessionLastSentSeq;
 
   /// True once the first Live notification of the current connection
   /// has arrived. Together with [_firstStatusReceived] this gates the
@@ -715,6 +810,7 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
 
     _latestReading = reading;
     _liveArrivalAnchor = (seq: packet.sequence, arrival: now);
+    _sessionSeqs.add(packet.sequence);
 
     if (!_liveReadingsController.isClosed) {
       _liveReadingsController.add(reading);
@@ -785,20 +881,32 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
   // ── Buffered sync ──────────────────────────────────────────────────────
 
   /// Called from both Live and Status handlers once the corresponding
-  /// "first" flag has flipped. Guarded by [_syncEvaluated] so at most
-  /// one decision runs per connection. Auto-resume attempts are driven
-  /// by [_onSyncHeartbeatFired] rather than this method.
+  /// "first" flag has flipped. Guarded by [_syncEvaluated] so the
+  /// initial decision runs at most once per connection; subsequent
+  /// evaluations within the session are driven by
+  /// [_handleBufferedEosFrame] (loop to the next gap) and auto-resume
+  /// attempts by [_onSyncHeartbeatFired].
   Future<void> _maybeStartSync() async {
     if (_syncEvaluated) return;
     if (!_firstLiveReceived || !_firstStatusReceived) return;
     _syncEvaluated = true;
+    await _evaluateNextGap(initial: true);
+  }
 
+  /// Gap-aware sync decision (Decisions 1–5). Scans for the lowest
+  /// missing contiguous sequence range within the device's current
+  /// power session and requests it; called once from
+  /// [_maybeStartSync] with `initial: true`, then re-entered with
+  /// `initial: false` after each range's EOS until no gaps remain,
+  /// the range cap is hit, or a terminal error occurs.
+  Future<void> _evaluateNextGap({required bool initial}) async {
     final status = _latestStatus;
     if (status == null) {
       debugPrint(
         '[BLEManager] Sync: no Status snapshot cached at decision '
         'time; giving up (should be unreachable).',
       );
+      if (!initial) _completeSyncSession();
       return;
     }
 
@@ -808,84 +916,233 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
         '[BLEManager] Sync: device reports zero buffered samples; '
         'nothing to do.',
       );
-      _publishSkipped(note: 'Device has no buffered samples');
-      _syncCompletedThisSession = true;
+      if (initial) {
+        _publishSkipped(note: 'Device has no buffered samples');
+        _syncCompletedThisSession = true;
+      } else {
+        _completeSyncSession();
+      }
       return;
     }
 
-    // Skip: no provider wired (dev harness path). Real app wires this
-    // in Step 7 via AppServices.
-    if (highestSequenceProvider == null) {
+    // Skip: no provider wired (dev harness path). The real app wires
+    // this via AppServices.
+    if (eraSequenceNumbersProvider == null) {
       debugPrint(
-        '[BLEManager] Sync: highestSequenceProvider not wired; '
-        'skipping sync. Wire it via `bleManager.highestSequenceProvider = '
-        'repo.getHighestSequenceNumber` in AppServices, or set it on '
+        '[BLEManager] Sync: eraSequenceNumbersProvider not wired; '
+        'skipping sync. Wire it via `bleManager.eraSequenceNumbersProvider '
+        '= repo.getSequenceNumbersSince` in AppServices, or set it on '
         'the harness before connecting to exercise sync.',
       );
-      _publishSkipped(note: 'highestSequenceProvider not wired');
+      _publishSkipped(note: 'eraSequenceNumbersProvider not wired');
       _syncCompletedThisSession = true;
+      if (!initial) _transitionTo(DeviceConnectionState.connected);
       return;
     }
 
-    int? ourHighest;
+    // ── Power-session scoping (revised Decision 2) ──────────────────
+    // The current power session began `uptime` seconds before the
+    // Status snapshot was received. The DB query cutoff sits an
+    // [_eraMargin] earlier so boundary rows aren't wrongly excluded,
+    // and the gap floor mirrors the same bound in sequence space:
+    // the session cannot have produced more than uptime/10 samples
+    // (plus margin), so anything below `newest − that` predates the
+    // last reboot and cannot be correctly time-stamped.
+    final sessionCutoff = status.receivedAt
+        .subtract(Duration(seconds: status.uptimeSeconds))
+        .subtract(_eraMargin);
+    final samplesThisPowerSession =
+        (status.uptimeSeconds ~/ _samplingIntervalSecInt) + _eraMarginSamples;
+    int floorFromUptime = status.newestBufferedSeq - samplesThisPowerSession;
+    if (floorFromUptime < 0) floorFromUptime = 0;
+    final gapFloor = floorFromUptime > status.oldestBufferedSeq
+        ? floorFromUptime
+        : status.oldestBufferedSeq;
+
+    // ── Which sequences do we already hold? ─────────────────────────
+    // DB rows within the power session, unioned with everything that
+    // arrived over BLE this session — the union closes the race on
+    // rows whose repository write hasn't committed yet (the freshly
+    // arrived live packet on `initial`, and just-streamed buffered
+    // records when re-entering after an EOS). Re-requesting a held
+    // record would create a near-duplicate row, so the union is what
+    // makes the whole design duplicate-safe.
+    final Set<int> held;
     try {
-      ourHighest = await highestSequenceProvider!();
+      final dbSeqs = await eraSequenceNumbersProvider!(sessionCutoff);
+      held = <int>{...dbSeqs, ..._sessionSeqs};
     } catch (e) {
       debugPrint(
-        '[BLEManager] Sync: highestSequenceProvider threw ($e); '
+        '[BLEManager] Sync: eraSequenceNumbersProvider threw ($e); '
         'skipping sync for this session.',
       );
-      _publishSkipped(note: 'highestSequenceProvider threw: $e');
-      _syncCompletedThisSession = true;
-      return;
-    }
-
-    // Skip: already caught up.
-    if (ourHighest != null && ourHighest >= status.newestBufferedSeq) {
-      if (ourHighest == status.newestBufferedSeq) {
-        debugPrint(
-          '[BLEManager] Sync: already caught up '
-          '(ourHighest=$ourHighest == device newest_buffered_seq).',
-        );
-        _publishSkipped(note: 'Already caught up (ourHighest = device newest)');
+      if (initial) {
+        _publishSkipped(note: 'eraSequenceNumbersProvider threw: $e');
+        _syncCompletedThisSession = true;
       } else {
-        // ourHighest > newestBufferedSeq — firmware sequence reset
-        // (Decision 4A). Two "eras" of sequence numbers coexist in
-        // the DB, separated by timestamps; skip sync rather than
-        // attempt a full-range refetch.
-        debugPrint(
-          '[BLEManager] Sync: firmware sequence reset detected '
-          '(device newest_buffered_seq=${status.newestBufferedSeq} < '
-          'our highest=$ourHighest). Skipping sync (Decision 4A). '
-          'New readings will flow via Live notifications; any records '
-          'the device buffered before we reconnected are not being '
-          'requested. If the buffer contains genuinely new data with '
-          'reset sequence numbers, wipe the DB via the dev-only Clear '
-          'action to recover them on next connect.',
-        );
-        _publishSkipped(note: 'Firmware sequence reset detected');
+        _publishTerminatedWithNote('Provider threw between ranges: $e');
+        _syncCompletedThisSession = true;
+        _transitionTo(DeviceConnectionState.connected);
       }
-      _syncCompletedThisSession = true;
       return;
     }
 
-    // Request the range. Empty DB → start at 0 to include a possible
-    // seq-0 record; otherwise start immediately after our highest.
-    final startSeq = (ourHighest == null) ? 0 : ourHighest + 1;
-    const endSeq = _syncEndSeqSentinel;
-    final expectedTotal = status.newestBufferedSeq - startSeq + 1;
+    // ── Firmware-reset backstop (Decision 4A retained) ──────────────
+    // Sequences persist across reboots (the firmware resumes its
+    // counter from flash), so under normal operation nothing we hold
+    // within the power-session window can exceed the device's newest
+    // by more than one Status interval of staleness. A larger excess
+    // means the flash was wiped and renumbering restarted moments
+    // ago; requesting ranges against mixed numbering would fetch the
+    // wrong records, so skip for the session.
+    int? maxHeld;
+    for (final s in held) {
+      if (maxHeld == null || s > maxHeld) maxHeld = s;
+    }
+    if (maxHeld != null &&
+        maxHeld > status.newestBufferedSeq + _resetToleranceSamples) {
+      debugPrint(
+        '[BLEManager] Sync: firmware sequence reset detected '
+        '(held max=$maxHeld exceeds device '
+        'newest_buffered_seq=${status.newestBufferedSeq} by more than '
+        '$_resetToleranceSamples). Skipping sync this session. If the '
+        'device flash was intentionally wiped, use the dev-only Clear '
+        'action to reset the DB before the next connect.',
+      );
+      if (initial) {
+        _publishSkipped(note: 'Firmware sequence reset detected');
+        _syncCompletedThisSession = true;
+      } else {
+        _publishTerminatedWithNote('Firmware sequence reset detected');
+        _syncCompletedThisSession = true;
+        _transitionTo(DeviceConnectionState.connected);
+      }
+      return;
+    }
 
-    _syncSessionStartedAt = DateTime.now();
-    _syncExpectedTotal = expectedTotal > 0 ? expectedTotal : null;
+    // ── Unrecoverable readings below the floor (Decision 5) ─────────
+    // Once per session: count flash records that exist on the device
+    // but predate the current power session. They cannot be correctly
+    // time-stamped (unknown power-off duration), so they are never
+    // requested — an honest gap beats silent mis-timestamping.
+    if (!_unrecoverableLoggedThisSession &&
+        gapFloor > status.oldestBufferedSeq) {
+      var unrecoverable = 0;
+      for (var s = status.oldestBufferedSeq; s < gapFloor; s++) {
+        if (!held.contains(s)) unrecoverable++;
+      }
+      if (unrecoverable > 0) {
+        debugPrint(
+          '[BLEManager] Sync: $unrecoverable reading(s) in '
+          '[${status.oldestBufferedSeq}..${gapFloor - 1}] predate the '
+          'current power session and cannot be time-stamped; leaving '
+          'them on the device (unrecoverable, Decision 5).',
+        );
+      }
+      _unrecoverableLoggedThisSession = true;
+    }
+
+    // ── Find the lowest gap in [gapFloor..newest] ────────────────────
+    final gap = _findNextGap(held, gapFloor, status.newestBufferedSeq);
+    if (gap == null) {
+      if (initial) {
+        debugPrint(
+          '[BLEManager] Sync: already caught up (no gaps in '
+          '[$gapFloor..${status.newestBufferedSeq}] within the current '
+          'power session).',
+        );
+        _publishSkipped(note: 'Already caught up (no gaps this power session)');
+        _syncCompletedThisSession = true;
+      } else {
+        debugPrint(
+          '[BLEManager] Sync: all gaps healed '
+          '($_gapRangesRequested range(s), '
+          '$_recordsReceivedThisSync record(s) this session).',
+        );
+        _completeSyncSession();
+      }
+      return;
+    }
+
+    // ── Range cap (Decision 3 safety valve) ─────────────────────────
+    if (_gapRangesRequested >= maxGapRangesPerSession) {
+      debugPrint(
+        '[BLEManager] Sync: range cap of $maxGapRangesPerSession '
+        'reached with gaps remaining (next: '
+        '[${gap.start}..${gap.end}]). Finishing session; remaining '
+        'gaps will be healed on the next reconnect.',
+      );
+      _publishTerminatedWithNote(
+        'Range cap ($maxGapRangesPerSession) reached; remaining gaps '
+        'heal on next reconnect',
+      );
+      _syncCompletedThisSession = true;
+      _transitionTo(DeviceConnectionState.connected);
+      return;
+    }
+
+    // On the first request of the session, estimate the total records
+    // the whole session should transfer: every missing sequence in
+    // [gapFloor..newest]. Preserved across ranges and resumes so the
+    // harness progress ratio is stable.
+    if (initial) {
+      var totalMissing = 0;
+      for (var s = gapFloor; s <= status.newestBufferedSeq; s++) {
+        if (!held.contains(s)) totalMissing++;
+      }
+      _syncExpectedTotal = totalMissing > 0 ? totalMissing : null;
+      _syncSessionStartedAt = DateTime.now();
+    }
+
+    await _requestGapRange(
+      startSeq: gap.start,
+      gapEnd: gap.end,
+      deviceNewest: status.newestBufferedSeq,
+    );
+  }
+
+  /// Scans `[floor..newest]` for the lowest sequence absent from
+  /// [held] and extends it to the last consecutive missing sequence.
+  /// Returns null when every sequence in the window is held.
+  ({int start, int end})? _findNextGap(Set<int> held, int floor, int newest) {
+    int? gapStart;
+    for (var s = floor; s <= newest; s++) {
+      if (!held.contains(s)) {
+        gapStart = s;
+        break;
+      }
+    }
+    if (gapStart == null) return null;
+    var gapEnd = gapStart;
+    while (gapEnd + 1 <= newest && !held.contains(gapEnd + 1)) {
+      gapEnd++;
+    }
+    return (start: gapStart, end: gapEnd);
+  }
+
+  /// Writes a sync request for one gap range and arms the heartbeat.
+  /// Interior gaps (Decision 4) get an exact `end_seq` so the device
+  /// cannot resend records above the gap that we already hold; a gap
+  /// reaching the device's newest uses the sentinel so a couple of
+  /// records buffered while we were scanning ride along too.
+  Future<void> _requestGapRange({
+    required int startSeq,
+    required int gapEnd,
+    required int deviceNewest,
+  }) async {
+    final endSeq = gapEnd >= deviceNewest ? _syncEndSeqSentinel : gapEnd;
+
+    _gapRangesRequested++;
     _syncAttemptNumber = 1;
+    _recordsReceivedThisRange = 0;
     _lastRequestedRange = (start: startSeq, end: endSeq);
-    _recordsReceivedThisSync = 0;
     _lastReceivedBufferedSeq = null;
+    _syncSessionStartedAt ??= DateTime.now();
 
     _syncProgressNotifier.value = BufferedSyncProgress(
       phase: BufferedSyncPhase.active,
       startedAt: _syncSessionStartedAt!,
-      recordsReceived: 0,
+      recordsReceived: _recordsReceivedThisSync,
       attemptNumber: 1,
       expectedTotal: _syncExpectedTotal,
       requestedStartSeq: startSeq,
@@ -896,10 +1153,10 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
     _armSyncHeartbeat();
 
     debugPrint(
-      '[BLEManager] Sync: attempt 1/$syncMaxAttempts requesting '
-      '[$startSeq..0x${endSeq.toRadixString(16)}] '
-      '(ourHighest=$ourHighest, device newest=${status.newestBufferedSeq}, '
-      'expected ~$expectedTotal records).',
+      '[BLEManager] Sync: gap detected — range $_gapRangesRequested/'
+      '$maxGapRangesPerSession, attempt 1/$syncMaxAttempts requesting '
+      '[$startSeq..${endSeq == _syncEndSeqSentinel ? '0x${endSeq.toRadixString(16)}' : '$endSeq'}] '
+      '(gap [$startSeq..$gapEnd], device newest=$deviceNewest).',
     );
 
     try {
@@ -918,18 +1175,53 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
     }
   }
 
+  /// Terminal success path for a gap-sync session: publishes the
+  /// accumulated snapshot, marks the session done, and returns the
+  /// connection to `connected`.
+  void _completeSyncSession() {
+    _syncHeartbeatTimer?.cancel();
+    _syncHeartbeatTimer = null;
+
+    // Cosmetic: the device's own bufferedCount is its total flash
+    // occupancy, but UI surfaces read this as "outstanding to sync",
+    // which is now zero.
+    _bufferedCount = 0;
+    _syncCompletedThisSession = true;
+
+    final prev = _syncProgressNotifier.value;
+    _syncProgressNotifier.value = BufferedSyncProgress(
+      phase: BufferedSyncPhase.completed,
+      startedAt: prev?.startedAt ?? _syncSessionStartedAt ?? DateTime.now(),
+      completedAt: DateTime.now(),
+      recordsReceived: _recordsReceivedThisSync,
+      attemptNumber: _syncAttemptNumber,
+      expectedTotal: _syncExpectedTotal,
+      sentCount: _sentCountTotal,
+      firstSentSeq: _sessionFirstSentSeq,
+      lastSentSeq: _sessionLastSentSeq,
+      requestedStartSeq: prev?.requestedStartSeq,
+      requestedEndSeq: prev?.requestedEndSeq,
+    );
+
+    _transitionTo(DeviceConnectionState.connected);
+  }
+
   /// Called from [_onSyncHeartbeatFired] when we've hit
   /// [_syncHeartbeatTimeout] without a Buffered frame but still have
   /// attempts left. Writes a fresh sync request starting from just
   /// after the last record we successfully received across any prior
-  /// attempt this session.
+  /// attempt of the current range. The end is the *current range's*
+  /// end, never the sentinel — resuming an interior gap with an open
+  /// end would resend records above the gap that we already hold and
+  /// insert near-duplicate rows (see the class docs on duplicate
+  /// safety).
   Future<void> _resumeSync() async {
     _syncAttemptNumber++;
 
     // Resume start: one past the highest seq we've received across all
-    // attempts. If nothing was received at all, fall back to the
-    // original start of the very first attempt so we're not re-inventing
-    // where to begin.
+    // attempts of this range. If nothing was received at all, fall
+    // back to the original start of the range's first attempt so
+    // we're not re-inventing where to begin.
     final int resumeStart;
     if (_lastReceivedBufferedSeq != null) {
       resumeStart = _lastReceivedBufferedSeq! + 1;
@@ -940,7 +1232,7 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
       // Belt and braces.
       resumeStart = 0;
     }
-    const resumeEnd = _syncEndSeqSentinel;
+    final resumeEnd = _lastRequestedRange?.end ?? _syncEndSeqSentinel;
 
     _lastRequestedRange = (start: resumeStart, end: resumeEnd);
 
@@ -948,7 +1240,7 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
       '[BLEManager] Sync resume: attempt '
       '$_syncAttemptNumber/$syncMaxAttempts after '
       '${_syncHeartbeatTimeout.inSeconds} s silence. '
-      'Requesting [$resumeStart..0x${resumeEnd.toRadixString(16)}]. '
+      'Requesting [$resumeStart..${resumeEnd == _syncEndSeqSentinel ? '0x${resumeEnd.toRadixString(16)}' : '$resumeEnd'}]. '
       'Records so far this session: $_recordsReceivedThisSync.',
     );
 
@@ -1064,6 +1356,12 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
         _bufferedReadingsController.add(reading);
       }
       _recordsReceivedThisSync++;
+      _recordsReceivedThisRange++;
+
+      // Record the sequence in the session set immediately, so the
+      // post-EOS gap re-scan can never re-request this record while
+      // its repository write is still in flight.
+      _sessionSeqs.add(packet.sequence);
 
       // Track the highest sequence seen so auto-resume knows where to
       // pick up. Records within a frame arrive in ascending seq order,
@@ -1103,50 +1401,50 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
   }) {
     final requested = _lastRequestedRange;
     debugPrint(
-      '[BLEManager] Buffered sync complete on attempt '
-      '$_syncAttemptNumber/$syncMaxAttempts. '
-      'Requested=${requested == null ? "n/a" : "[${requested.start}..0x${requested.end.toRadixString(16)}]"}. '
+      '[BLEManager] Buffered range complete '
+      '(range $_gapRangesRequested/$maxGapRangesPerSession, attempt '
+      '$_syncAttemptNumber/$syncMaxAttempts). '
+      'Requested=${requested == null ? "n/a" : "[${requested.start}..${requested.end == _syncEndSeqSentinel ? '0x${requested.end.toRadixString(16)}' : '${requested.end}'}]"}. '
       'Device sent: first_sent=$firstSentSeq, last_sent=$lastSentSeq, '
       'sent_count=$sentCount. Total records received this session: '
       '$_recordsReceivedThisSync.',
     );
 
-    if (_syncAttemptNumber == 1 && sentCount != _recordsReceivedThisSync) {
-      // Only warn on mismatch for a first-attempt clean run. Under
-      // resume, the EOS's sent_count counts only what came back in
-      // *this* attempt, so it deliberately won't equal the
-      // whole-session total.
+    if (_syncAttemptNumber == 1 && sentCount != _recordsReceivedThisRange) {
+      // Only warn on mismatch for a first-attempt clean run of this
+      // range. Under resume, the EOS's sent_count counts only what
+      // came back in *this* attempt, so it deliberately won't equal
+      // the whole-range total.
       debugPrint(
         '[BLEManager] Buffered sync: reconciliation mismatch on first '
         'attempt — device reports $sentCount records, we counted '
-        '$_recordsReceivedThisSync. Difference is usually zero on iOS; '
-        'a non-zero delta suggests notification loss (rare) or a '
-        'malformed frame that was dropped upstream.',
+        '$_recordsReceivedThisRange for this range. Difference is '
+        'usually zero on iOS; a non-zero delta suggests notification '
+        'loss (rare) or a malformed frame that was dropped upstream.',
       );
     }
 
     _syncHeartbeatTimer?.cancel();
     _syncHeartbeatTimer = null;
 
-    _bufferedCount = 0;
-    _syncCompletedThisSession = true;
+    // Accumulate session-wide EOS stats for the final progress
+    // snapshot published by _completeSyncSession.
+    _sentCountTotal += sentCount;
+    if (sentCount > 0) {
+      if (_sessionFirstSentSeq == null || firstSentSeq < _sessionFirstSentSeq!) {
+        _sessionFirstSentSeq = firstSentSeq;
+      }
+      if (_sessionLastSentSeq == null || lastSentSeq > _sessionLastSentSeq!) {
+        _sessionLastSentSeq = lastSentSeq;
+      }
+    }
 
-    final prev = _syncProgressNotifier.value;
-    _syncProgressNotifier.value = BufferedSyncProgress(
-      phase: BufferedSyncPhase.completed,
-      startedAt: prev?.startedAt ?? _syncSessionStartedAt ?? DateTime.now(),
-      completedAt: DateTime.now(),
-      recordsReceived: _recordsReceivedThisSync,
-      attemptNumber: _syncAttemptNumber,
-      expectedTotal: _syncExpectedTotal,
-      sentCount: sentCount,
-      firstSentSeq: sentCount > 0 ? firstSentSeq : null,
-      lastSentSeq: sentCount > 0 ? lastSentSeq : null,
-      requestedStartSeq: prev?.requestedStartSeq,
-      requestedEndSeq: prev?.requestedEndSeq,
-    );
-
-    _transitionTo(DeviceConnectionState.connected);
+    // Loop (Decision 3): re-scan for the next gap. The scan unions
+    // the DB with _sessionSeqs, so records from this range whose
+    // repository writes haven't committed yet are already counted as
+    // held. _evaluateNextGap either requests the next range or calls
+    // _completeSyncSession when nothing is missing.
+    unawaited(_evaluateNextGap(initial: false));
   }
 
   /// Reads the current live anchor and projects a wall-clock time for
@@ -1281,10 +1579,17 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
     _syncCompletedThisSession = false;
     _lastRequestedRange = null;
     _recordsReceivedThisSync = 0;
+    _recordsReceivedThisRange = 0;
     _lastReceivedBufferedSeq = null;
     _syncAttemptNumber = 0;
     _syncSessionStartedAt = null;
     _syncExpectedTotal = null;
+    _sessionSeqs.clear();
+    _gapRangesRequested = 0;
+    _unrecoverableLoggedThisSession = false;
+    _sentCountTotal = 0;
+    _sessionFirstSentSeq = null;
+    _sessionLastSentSeq = null;
 
     final device = _connectedDevice;
     _connectedDevice = null;

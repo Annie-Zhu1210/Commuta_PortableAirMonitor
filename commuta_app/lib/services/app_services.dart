@@ -79,8 +79,8 @@ class AppServices {
   ///      still holding `sourceFlag = 'mock'` rows from the previous
   ///      MockManager era.
   ///   4. BLEManager is created as a concrete reference so
-  ///      `highestSequenceProvider` can be wired — the field is on
-  ///      the concrete class, not on either interface.
+  ///      `eraSequenceNumbersProvider` can be wired — the field is
+  ///      on the concrete class, not on either interface.
   ///   5. The repository is constructed *before* the provider is
   ///      wired (the provider is a reference to one of its methods)
   ///      and started *before* the BLE manager (so live and buffered
@@ -121,7 +121,7 @@ class AppServices {
 
     // ── BLE cutover ──────────────────────────────────────────────
     // Concrete BLEManager reference — needed to wire
-    // `highestSequenceProvider`, which lives on the concrete class
+    // `eraSequenceNumbersProvider`, which lives on the concrete class
     // rather than on either interface. The two interface-typed late
     // finals below both point at the same instance.
     final manager = BLEManager();
@@ -134,11 +134,12 @@ class AppServices {
     readingsRepository = ReadingsRepository(database, dataSource);
 
     // Break the constructor-time chicken-and-egg between repo and
-    // manager: the manager needs to ask the repo for the highest
-    // persisted sequence number when it evaluates buffered sync,
+    // manager: the manager needs to ask the repo which sequence
+    // numbers are already persisted within the device's current
+    // power session when it evaluates the gap-aware buffered sync,
     // but the repo needs the data source to construct.
-    manager.highestSequenceProvider =
-        readingsRepository.getHighestSequenceNumber;
+    manager.eraSequenceNumbersProvider =
+        readingsRepository.getSequenceNumbersSince;
 
     // Subscribe before starting the manager, so live and buffered
     // streams have listeners in place before the first packet.

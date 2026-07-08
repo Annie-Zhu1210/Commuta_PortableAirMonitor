@@ -57,9 +57,13 @@ The three screenshots at the top were captured during real device testing.
 
 **A vape puff.** PM2.5 spikes to 4153 µg/m³. Its score is 100 × (1 − 4153 / 70) = far below zero and clamps to **0**. PM2.5's band is now Very High. Hero flips instantly to **0, "Severe Pollution"**, deep red.
 
-|  |  |  |
-|---|---|---|
-| <img src="herocard_green.PNG" width="200"> | <img src="herocard_yellow.PNG" width="200"> | <img src="herocard_red.PNG" width="200"> |
+<div align="center">
+  <img src="https://github.com/Annie-Zhu1210/Commuta_PortableAirMonitor/blob/main/commuta_app/docs/images/herocard_green.PNG" width="250">
+  &nbsp;&nbsp;&nbsp;
+  <img src="https://github.com/Annie-Zhu1210/Commuta_PortableAirMonitor/blob/main/commuta_app/docs/images/herocard_yellow.PNG" width="250">
+  &nbsp;&nbsp;&nbsp;
+  <img src="https://github.com/Annie-Zhu1210/Commuta_PortableAirMonitor/blob/main/commuta_app/docs/images/herocard_red.PNG" width="250">
+</div>
 
 ## Excluded from the score
 

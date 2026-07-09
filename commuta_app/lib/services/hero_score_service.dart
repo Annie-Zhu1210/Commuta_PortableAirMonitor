@@ -1,47 +1,42 @@
 import 'package:flutter/material.dart';
 
-import '../core/constants/app_colours.dart';
-import '../core/utils/daqi_utils.dart';
 import '../data/models/air_quality_reading.dart';
 
-/// The result of scoring a single [AirQualityReading] for the Home
+/// Result of scoring a single [AirQualityReading] for the Home
 /// screen hero card.
 ///
 /// The hero card shows two things prominently: a numeric score in the
-/// range 0–100 and a descriptor word. Both are driven by the
-/// worst-scoring metric in the reading. A score of 100 is the cleanest
-/// air the formula can express; 0 means at least one metric has hit or
-/// passed its "Very High" band boundary.
+/// range 0–100 and a plain-English descriptor. Under the arc-gauge
+/// design, both derive from the score itself: [descriptor] comes from
+/// a quarter-based cutoff (Good, Moderate Pollution, High Pollution,
+/// Severe Pollution) and [colour] from a ten-band palette that assigns
+/// one hue to every 10-point score range. The arc widget applies that
+/// palette colour uniformly across all 20 segments and uses opacity to
+/// show where the score sits.
 ///
-/// The [HeroScore.empty] singleton represents the waiting state (no
-/// reading has arrived yet); everything on it is null.
+/// [HeroScore.empty] represents the waiting state (no reading yet).
 class HeroScore {
   /// Overall score, 0–100, or null in the waiting state.
   final int? score;
 
-  /// Descriptor word shown as the secondary line on the hero card
-  /// ("Good", "Moderate Pollution", "High Pollution",
-  /// "Severe Pollution"). Null in the waiting state.
+  /// Descriptor word shown in the pill below the number.
+  /// Null in the waiting state.
   final String? descriptor;
 
-  /// Colour to use for the score and descriptor. One of the
-  /// [AppColours.daqi*] palette. Null in the waiting state.
+  /// Colour of the arc segments, number, and pill for this score.
+  /// One of the ten palette entries in [_colourForScore]. Null in the
+  /// waiting state.
   final Color? colour;
 
-  /// DAQI band of the metric that drove the score (worst per Plan 2).
-  /// Null in the waiting state.
-  final DaqiBand? band;
-
-  /// True when at least one SGP41-derived metric (NOx or TVOC) was
+  /// True when at least one SGP41-derived metric (NOx or VOC) was
   /// null at compute time — i.e. the sensor was still conditioning.
-  /// Exposed for future UI use; not surfaced in Session 6.
+  /// Not surfaced in the UI, but kept on the model for future use.
   final bool hasPartialData;
 
   const HeroScore({
     required this.score,
     required this.descriptor,
     required this.colour,
-    required this.band,
     required this.hasPartialData,
   });
 
@@ -50,67 +45,99 @@ class HeroScore {
     score:          null,
     descriptor:     null,
     colour:         null,
-    band:           null,
     hasPartialData: false,
   );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Very-high-start anchors (Decision 1a)
+//  DAQI band boundaries per metric (upper bound of each named band)
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// The per-metric score is:
-//     score = 100 × max(0, 1 − value / veryHighStart)
+// Each metric's per-metric score is a piecewise-linear mapping from these
+// boundaries to fixed anchors on the 0–100 score axis:
 //
-// so the anchors below are the points at which each metric's contribution
-// drops to zero. They coincide with the top of the "High" DAQI band for the
-// four-band metrics (PM2.5, PM10, NOx, TVOC) and with the top of "Adequate
-// ventilation" for CO₂, which uses a three-band scale (Decision 1b).
+//     value = 0                → score = 100
+//     value = "Low" band top   → score = 75  (top of Good descriptor range)
+//     value = "Mod" band top   → score = 50  (top of Moderate Pollution)
+//     value = "High" band top  → score = 25  (top of High Pollution)
+//     value = 2 × "High" − "Mod" → score = 0 (top of Severe Pollution)
+//
+// This keeps every metric's DAQI band aligned with the same descriptor
+// quarter, so "in Low DAQI band" always reads as "Good" regardless of
+// which metric happens to be worst. CO₂ has only three DAQI bands and
+// stops at 25 (Decision 1b — CO₂ alone can't push the card to Severe).
 
-const double _veryHighStartPm25 = 70;    // µg/m³ — DEFRA DAQI top of High
-const double _veryHighStartPm10 = 100;   // µg/m³ — DEFRA DAQI top of High
-const double _veryHighStartCo2  = 1500;  // ppm   — top of Adequate ventilation
-const double _veryHighStartNox  = 300;   // SGP41 index — top of Moderate event
-const double _veryHighStartTvoc = 400;   // SGP41 index — top of High
+// PM2.5 (µg/m³): [0,35] Low, (35,53] Moderate, (53,70] High, (70,∞) Very High
+const double _pm25BandLow  = 35;
+const double _pm25BandMod  = 53;
+const double _pm25BandHigh = 70;
 
-/// Computes the hero AQI score for a single [reading] (Plan 2:
-/// worst-metric-normalised scoring).
+// PM10 (µg/m³): [0,50] Low, (50,75] Moderate, (75,100] High, (100,∞) Very High
+const double _pm10BandLow  = 50;
+const double _pm10BandMod  = 75;
+const double _pm10BandHigh = 100;
+
+// CO₂ (ppm): [0,800] Good ventilation, (800,1500] Adequate, (1500,∞) Poor.
+// No Very High band — CO₂'s score floors at 25.
+const double _co2BandLow = 800;
+const double _co2BandMod = 1500;
+
+// NOx (SGP41 index): [0,30] Baseline, (30,150] Mild event,
+//                    (150,300] Moderate, (300,∞) High
+const double _noxBandLow  = 30;
+const double _noxBandMod  = 150;
+const double _noxBandHigh = 300;
+
+// VOC (SGP41 index): [0,150] Low, (150,250] Moderate, (250,400] High,
+//                    (400,∞) Very High
+const double _vocBandLow  = 150;
+const double _vocBandMod  = 250;
+const double _vocBandHigh = 400;
+
+/// Computes the hero AQI score from a single [reading].
 ///
-/// Metrics considered: PM2.5, PM10, CO₂, NOx index, TVOC index.
-/// PM1 is intentionally excluded (Decision 1c — no official DAQI band).
-/// NOx and TVOC are excluded from the score while null, i.e. while the
-/// SGP41 sensor is still conditioning (Decision 4).
+/// Per-metric score maps the value into 0–100 using a piecewise linear
+/// scale keyed to that metric's DAQI band boundaries. The overall
+/// score is the minimum across available metrics. PM1 is intentionally
+/// excluded, and NOx / VOC drop out while the SGP41 is conditioning.
 ///
-/// The overall score is the minimum across per-metric scores; the
-/// overall descriptor and colour come from the DAQI band of that
-/// score-driving metric. Swapping to a different algorithm later
-/// (e.g. a weighted-sum Plan 1) is a single-function replacement.
+/// The final integer is produced by `.floor()` rather than `.round()`:
+/// this keeps the displayed descriptor aligned with the DAQI band the
+/// worst metric is actually in. A metric that has just crossed a band
+/// boundary (say PM2.5 at 53.2, which lands in the High DAQI band and
+/// has a raw sub-score of 49.7) should read as the higher-pollution
+/// descriptor, not be rounded back to the boundary and flip category.
 HeroScore computeHeroScore(AirQualityReading reading) {
-  // Every entry that participates in the score, tagged with the DAQI
-  // band of its source metric so we can look up the descriptor + colour
-  // once we know which one drove the overall score.
-  final entries = <({double score, DaqiBand band})>[];
+  final scores = <double>[];
 
-  entries.add((
-    score: _metricScore(reading.pm25, _veryHighStartPm25),
-    band:  DaqiUtils.forPm25(reading.pm25).band,
+  scores.add(_metricScore(
+    reading.pm25,
+    vLow:  _pm25BandLow,
+    vMod:  _pm25BandMod,
+    vHigh: _pm25BandHigh,
   ));
-  entries.add((
-    score: _metricScore(reading.pm10, _veryHighStartPm10),
-    band:  DaqiUtils.forPm10(reading.pm10).band,
+  scores.add(_metricScore(
+    reading.pm10,
+    vLow:  _pm10BandLow,
+    vMod:  _pm10BandMod,
+    vHigh: _pm10BandHigh,
   ));
-  entries.add((
-    score: _metricScore(reading.co2, _veryHighStartCo2),
-    band:  DaqiUtils.forCo2(reading.co2).band,
+  scores.add(_metricScore(
+    reading.co2,
+    vLow: _co2BandLow,
+    vMod: _co2BandMod,
+    // vHigh omitted — CO₂ is a three-band metric.
   ));
 
   var hasPartialData = false;
 
   final nox = reading.nox;
   if (nox != null) {
-    entries.add((
-      score: _metricScore(nox, _veryHighStartNox),
-      band:  DaqiUtils.forNox(nox)!.band,
+    scores.add(_metricScore(
+      nox,
+      vLow:  _noxBandLow,
+      vMod:  _noxBandMod,
+      vHigh: _noxBandHigh,
     ));
   } else {
     hasPartialData = true;
@@ -118,57 +145,99 @@ HeroScore computeHeroScore(AirQualityReading reading) {
 
   final tvoc = reading.tvoc;
   if (tvoc != null) {
-    entries.add((
-      score: _metricScore(tvoc, _veryHighStartTvoc),
-      band:  DaqiUtils.forTvoc(tvoc)!.band,
+    scores.add(_metricScore(
+      tvoc,
+      vLow:  _vocBandLow,
+      vMod:  _vocBandMod,
+      vHigh: _vocBandHigh,
     ));
   } else {
     hasPartialData = true;
   }
 
-  // Pick the worst-scoring entry. ties don't matter — any of the
-  // tied metrics will be in an equally severe band by construction.
-  var worst = entries.first;
-  for (final e in entries.skip(1)) {
-    if (e.score < worst.score) worst = e;
+  var worst = scores.first;
+  for (final s in scores.skip(1)) {
+    if (s < worst) worst = s;
   }
 
+  final overallScore = worst.floor();
+
   return HeroScore(
-    score:          worst.score.round(),
-    descriptor:     _descriptorForBand(worst.band),
-    colour:         _colourForBand(worst.band),
-    band:           worst.band,
+    score:          overallScore,
+    descriptor:     _descriptorForScore(overallScore),
+    colour:         _colourForScore(overallScore),
     hasPartialData: hasPartialData,
   );
 }
 
-/// Per-metric score: 100 × max(0, 1 − value / anchor), clamped to
-/// [0, 100]. Values at or above the anchor produce 0; a value of 0
-/// produces the clean-end anchor of 100.
-double _metricScore(double value, double anchor) {
-  final raw = 100.0 * (1.0 - value / anchor);
-  return raw.clamp(0.0, 100.0);
+/// Piecewise-linear score for a single metric. Each DAQI band maps to
+/// a specific quarter of the 0–100 score range:
+///
+///   [0..vLow]   Low          →  100 down to 75  (Good)
+///   (vLow..vMod]  Moderate   →   75 down to 50  (Moderate Pollution)
+///   (vMod..vHigh] High       →   50 down to 25  (High Pollution)
+///   (vHigh..∞)  Very High    →   25 down to 0   (Severe Pollution)
+///
+/// Pass [vHigh] as null for three-band metrics like CO₂. In that case
+/// the score floors at 25 — the metric can't push the card into
+/// Severe Pollution on its own.
+double _metricScore(
+  double value, {
+  required double vLow,
+  required double vMod,
+  double? vHigh,
+}) {
+  if (value <= 0)    return 100.0;
+  if (value <= vLow) return 100.0 - 25.0 * (value / vLow);
+  if (value <= vMod) {
+    return 75.0 - 25.0 * ((value - vLow) / (vMod - vLow));
+  }
+
+  if (vHigh == null) {
+    // Three-band metric (CO₂): extrapolate past vMod at the same slope
+    // as the Moderate band, and floor at 25.
+    final range = vMod - vLow;
+    final raw   = 50.0 - 25.0 * ((value - vMod) / range);
+    return raw.clamp(25.0, 50.0);
+  }
+
+  if (value <= vHigh) {
+    return 50.0 - 25.0 * ((value - vMod) / (vHigh - vMod));
+  }
+
+  // Very High band: extrapolate past vHigh at the same slope as High.
+  final range = vHigh - vMod;
+  final raw   = 25.0 - 25.0 * ((value - vHigh) / range);
+  return raw.clamp(0.0, 25.0);
 }
 
-/// Descriptor word for the hero card's secondary line (Decision 2a).
-String _descriptorForBand(DaqiBand band) {
-  switch (band) {
-    case DaqiBand.low:      return 'Good';
-    case DaqiBand.moderate: return 'Moderate Pollution';
-    case DaqiBand.high:     return 'High Pollution';
-    case DaqiBand.veryHigh: return 'Severe Pollution';
-  }
+/// Descriptor word for the hero card's pill. Cutoffs are chosen so
+/// each DAQI band lands cleanly in its descriptor quarter:
+///
+///   [ 0..24]  → "Severe Pollution"
+///   [25..49]  → "High Pollution"
+///   [50..74]  → "Moderate Pollution"
+///   [75..100] → "Good"
+String _descriptorForScore(int score) {
+  if (score >= 75) return 'Good';
+  if (score >= 50) return 'Moderate Pollution';
+  if (score >= 25) return 'High Pollution';
+  return 'Severe Pollution';
 }
 
-/// Score / descriptor colour, driven by the DAQI band of the worst
-/// available metric. Matches the palette used elsewhere in the app
-/// so the hero card and the metric grid speak the same visual
-/// language.
-Color _colourForBand(DaqiBand band) {
-  switch (band) {
-    case DaqiBand.low:      return AppColours.daqiLow;       // sage — good
-    case DaqiBand.moderate: return AppColours.daqiModerate;  // amber
-    case DaqiBand.high:     return AppColours.daqiHigh;      // coral
-    case DaqiBand.veryHigh: return AppColours.daqiVeryHigh;  // deep coral-red — bad
-  }
+/// Ten-band colour palette, one colour per 10-point score range.
+/// Applied uniformly to all 20 arc segments at any given moment; the
+/// fill/fade split (rendered by the widget) shows where within the
+/// arc the current score sits.
+Color _colourForScore(int score) {
+  if (score <= 10) return const Color.fromARGB(255, 155,  74,  66); //   0–10
+  if (score <= 20) return const Color.fromARGB(255, 172,  92,  92); //  11–20
+  if (score <= 30) return const Color.fromARGB(255, 204, 122, 111); //  21–30
+  if (score <= 40) return const Color.fromARGB(255, 204, 150, 111); //  31–40
+  if (score <= 50) return const Color.fromARGB(255, 212, 169, 106); //  41–50
+  if (score <= 60) return const Color.fromARGB(255, 226, 212, 106); //  51–60
+  if (score <= 70) return const Color.fromARGB(255, 212, 198, 106); //  61–70
+  if (score <= 80) return const Color.fromARGB(255, 180, 196, 135); //  71–80
+  if (score <= 90) return const Color.fromARGB(255, 142, 196, 135); //  81–90
+  return const Color.fromARGB(255, 122, 196, 135);                   //  91–100
 }

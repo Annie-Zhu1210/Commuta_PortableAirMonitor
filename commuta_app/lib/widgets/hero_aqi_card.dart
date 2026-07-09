@@ -1,23 +1,22 @@
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../core/constants/app_colours.dart';
 import '../data/models/air_quality_reading.dart';
 import '../services/hero_score_service.dart';
 
-/// Hero card at the top of the Home screen showing an overall
-/// air-quality score for the latest [AirQualityReading].
+/// Hero card at the top of the Home screen — a semicircular arc gauge
+/// showing an overall air-quality score.
 ///
-/// Layout:
-///   - Title row: "Overall Air Quality" (+ a small band-coloured dot)
-///     on the left, "Updated HH:MM" on the right.
-///   - Score body: a large numeric score coloured by band, with the
-///     descriptor word ("Good" / "Moderate Pollution" / "High Pollution"
-///     / "Severe Pollution") in the same colour underneath.
+/// The arc is 20 rounded-line segments spanning a 180° sweep. All 20
+/// segments take the score's own palette colour ([HeroScore.colour])
+/// at any given moment; the fill split shows where the score sits,
+/// with the leftmost N segments at full opacity and the rest at 50%,
+/// where N = max(1, round(score / 5)). At score 0 the leftmost
+/// segment stays at full opacity as a visible "worst end" marker.
 ///
-/// Pass `reading: null` to show the "Waiting for reading..." empty state.
-/// The scoring formula lives in [computeHeroScore]; this widget only
-/// renders whatever that function returns, so swapping the formula
-/// doesn't require touching this file.
+/// The scoring logic lives in [computeHeroScore]; this widget only
+/// renders the result. Pass `reading: null` for the waiting state.
 class HeroAqiCard extends StatelessWidget {
   final AirQualityReading? reading;
 
@@ -37,7 +36,7 @@ class HeroAqiCard extends StatelessWidget {
 
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(24),
+      padding: const EdgeInsets.fromLTRB(20, 20, 20, 12),
       decoration: BoxDecoration(
         color: AppColours.surface,
         borderRadius: BorderRadius.circular(20),
@@ -55,10 +54,6 @@ class HeroAqiCard extends StatelessWidget {
           // ── Title row ────────────────────────────────────────────────────
           Row(
             children: [
-              // Subtle band-coloured indicator dot next to the title.
-              // Reinforces the band beyond the coloured score number, and
-              // gives colour-blind users a second cue paired with the
-              // descriptor text below.
               if (hasScore) ...[
                 Container(
                   width: 10,
@@ -73,9 +68,9 @@ class HeroAqiCard extends StatelessWidget {
               const Text(
                 'Overall Air Quality',
                 style: TextStyle(
-                  fontSize: 17,
-                  fontWeight: FontWeight.w700,
-                  color: AppColours.textPrimary,
+                  fontSize:      17,
+                  fontWeight:    FontWeight.w700,
+                  color:         AppColours.textPrimary,
                   letterSpacing: 0.1,
                 ),
               ),
@@ -85,22 +80,20 @@ class HeroAqiCard extends StatelessWidget {
                   'Updated ${_formatTime(r.timestamp)}',
                   style: const TextStyle(
                     fontSize: 11,
-                    color: AppColours.textSecondary,
+                    color:    AppColours.textSecondary,
                   ),
                 ),
             ],
           ),
+          const SizedBox(height: 12),
 
-          const SizedBox(height: 20),
-
-          // ── Score body ───────────────────────────────────────────────────
-          Center(
+          // ── Arc gauge region ─────────────────────────────────────────────
+          SizedBox(
+            height: 200,
             child: hasScore
-                ? _ScoreBody(heroScore: heroScore)
+                ? _ArcGaugeBody(heroScore: heroScore)
                 : const _WaitingBody(),
           ),
-
-          const SizedBox(height: 12),
         ],
       ),
     );
@@ -108,40 +101,152 @@ class HeroAqiCard extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Populated state — big score number + descriptor word
+//  Arc geometry — shared by the painter and the overlay so the arc and
+//  the number/pill always line up regardless of container size.
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// A generous `rOuter` pushes the arc peak high up the card, so the
+// segments arc well above the number instead of crowding against it.
+// `rInnerRatio` is back at 0.80 to keep the segments visibly long.
+
+const double _bottomMargin   = 24;   // space at the bottom for 0/100 labels
+const double _rInnerRatio    = 0.80; // fraction of rOuter left empty inside
+const double _widthFraction  = 0.46; // arc width as a fraction of region width
+const double _heightFraction = 0.85; // arc height cap as a fraction of region height
+
+double _computeROuter(double w, double h) =>
+    math.min(w * _widthFraction, h * _heightFraction);
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Populated state — arc + number + descriptor pill + endpoint labels
 // ─────────────────────────────────────────────────────────────────────────────
 
-class _ScoreBody extends StatelessWidget {
+class _ArcGaugeBody extends StatelessWidget {
   final HeroScore heroScore;
 
-  const _ScoreBody({required this.heroScore});
+  const _ArcGaugeBody({required this.heroScore});
+
+  /// Darker version of [base] for text against the white card.
+  /// Fixing HSL lightness at 25% handles both very light yellows
+  /// (which need aggressive darkening) and already-dark reds
+  /// (which only need a nudge) with one consistent rule.
+  static Color _darker(Color base) {
+    return HSLColor.fromColor(base).withLightness(0.25).toColor();
+  }
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Text(
-          '${heroScore.score}',
-          style: TextStyle(
-            fontSize: 56,
-            fontWeight: FontWeight.w600,
-            color: heroScore.colour,
-            height: 1.0,
-            letterSpacing: -1.0,
-          ),
-        ),
-        const SizedBox(height: 8),
-        Text(
-          heroScore.descriptor ?? '',
-          style: TextStyle(
-            fontSize: 15,
-            fontWeight: FontWeight.w500,
-            color: heroScore.colour,
-            letterSpacing: 0.2,
-          ),
-        ),
-      ],
+    final Color base   = heroScore.colour ?? AppColours.textSecondary;
+    final Color darker = _darker(base);
+    final Color pillBg = base.withValues(alpha: 0.28);
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final double w = constraints.maxWidth;
+        final double h = constraints.maxHeight;
+
+        // Arc geometry — matches _ArcGaugePainter so overlays line up.
+        final double cx     = w / 2;
+        final double cy     = h - _bottomMargin;
+        final double rOuter = _computeROuter(w, h);
+        final double rInner = rOuter * _rInnerRatio;
+
+        // Number sizing — proportional to the inner radius so it fits
+        // inside the arc's empty area on any screen size.
+        final double numberFontSize = (rInner * 0.45).clamp(36.0, 54.0);
+        final double numberTop      = cy - rInner + 20;
+        final double pillTop        = numberTop + numberFontSize + 8;
+
+        // Endpoint label positions — centred under the arc's horizontal
+        // endpoints so they read as "the arc starts at 0 here".
+        final double leftEndpointX  = cx - rOuter;
+        final double rightEndpointX = cx + rOuter;
+
+        return Stack(
+          children: [
+            // ── Arc ────────────────────────────────────────────────────
+            Positioned.fill(
+              child: CustomPaint(
+                painter: _ArcGaugePainter(
+                  score:      heroScore.score,
+                  baseColour: base,
+                ),
+              ),
+            ),
+
+            // ── Number ─────────────────────────────────────────────────
+            Positioned(
+              top:   numberTop,
+              left:  0,
+              right: 0,
+              child: Center(
+                child: Text(
+                  '${heroScore.score}',
+                  style: TextStyle(
+                    fontSize:      numberFontSize,
+                    fontWeight:    FontWeight.w600,
+                    color:         darker,
+                    letterSpacing: -1.5,
+                    height:        1.0,
+                  ),
+                ),
+              ),
+            ),
+
+            // ── Descriptor pill ────────────────────────────────────────
+            Positioned(
+              top:   pillTop,
+              left:  0,
+              right: 0,
+              child: Center(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical:   5,
+                  ),
+                  decoration: BoxDecoration(
+                    color:        pillBg,
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Text(
+                    heroScore.descriptor ?? '',
+                    style: TextStyle(
+                      fontSize:      13,
+                      fontWeight:    FontWeight.w600,
+                      color:         darker,
+                      letterSpacing: 0.2,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+
+            // ── Endpoint labels 0 and 100 ──────────────────────────────
+            Positioned(
+              bottom: 4,
+              left:   math.max(0, leftEndpointX - 4),
+              child: Text(
+                '0',
+                style: TextStyle(
+                  fontSize: 11,
+                  color:    AppColours.textSecondary.withValues(alpha: 0.75),
+                ),
+              ),
+            ),
+            Positioned(
+              bottom: 4,
+              left:   math.max(0, rightEndpointX - 10),
+              child: Text(
+                '100',
+                style: TextStyle(
+                  fontSize: 11,
+                  color:    AppColours.textSecondary.withValues(alpha: 0.75),
+                ),
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 }
@@ -156,27 +261,90 @@ class _WaitingBody extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Column(
-      mainAxisSize: MainAxisSize.min,
+      mainAxisAlignment: MainAxisAlignment.center,
       children: [
         Text(
           '—',
           style: TextStyle(
-            fontSize: 56,
+            fontSize:   56,
             fontWeight: FontWeight.w300,
-            color: AppColours.textSecondary.withValues(alpha: 0.6),
-            height: 1.0,
+            color:      AppColours.textSecondary.withValues(alpha: 0.6),
+            height:     1.0,
           ),
         ),
-        const SizedBox(height: 8),
+        const SizedBox(height: 10),
         Text(
           'Waiting for reading…',
           style: TextStyle(
-            fontSize: 13,
-            color: AppColours.textSecondary.withValues(alpha: 0.85),
+            fontSize:  13,
+            color:     AppColours.textSecondary.withValues(alpha: 0.85),
             fontStyle: FontStyle.italic,
           ),
         ),
       ],
     );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Arc gauge painter — 20 rounded-line segments in a 180° sweep
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _ArcGaugePainter extends CustomPainter {
+  final int?  score;
+  final Color baseColour;
+
+  static const int _segmentCount = 20;
+
+  const _ArcGaugePainter({
+    required this.score,
+    required this.baseColour,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (score == null) return;
+
+    // Geometry mirrors [_ArcGaugeBody] so the arc lines up with the
+    // overlaid text and pill.
+    final double cx          = size.width / 2;
+    final double cy          = size.height - _bottomMargin;
+    final double rOuter      = _computeROuter(size.width, size.height);
+    final double rInner      = rOuter * _rInnerRatio;
+    final double strokeWidth = math.max(5.0, rOuter * 0.055);
+
+    // Fill count: leftmost N segments at full opacity, the rest at
+    // 50% opacity. score 0 is special-cased so the leftmost segment
+    // stays visible as a "worst end" marker.
+    int fillCount = (score! / 5).round();
+    if (score == 0) fillCount = 1;
+    fillCount = fillCount.clamp(1, _segmentCount);
+
+    for (var i = 0; i < _segmentCount; i++) {
+      // Segment angle, distributed evenly across a 180° arc from the
+      // left endpoint (angle π) to the right (angle 0).
+      final double t     = i / (_segmentCount - 1);
+      final double theta = math.pi * (1 - t);
+      final double cosT  = math.cos(theta);
+      final double sinT  = math.sin(theta);
+
+      // Canvas y grows downward, so we subtract sinT to move up.
+      final Offset inner = Offset(cx + rInner * cosT, cy - rInner * sinT);
+      final Offset outer = Offset(cx + rOuter * cosT, cy - rOuter * sinT);
+
+      final bool  isFilled = i < fillCount;
+      final Paint paint    = Paint()
+        ..color       = baseColour.withValues(alpha: isFilled ? 1.0 : 0.5)
+        ..strokeCap   = StrokeCap.round
+        ..strokeWidth = strokeWidth;
+
+      canvas.drawLine(inner, outer, paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _ArcGaugePainter oldDelegate) {
+    return oldDelegate.score      != score ||
+           oldDelegate.baseColour != baseColour;
   }
 }

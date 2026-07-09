@@ -139,6 +139,35 @@ class ReadingsRepository {
     return rows.map(_fromRow).toList();
   }
 
+  /// Returns every reading whose timestamp falls on [day] in local
+  /// time, regardless of station classification, ordered ascending
+  /// by timestamp.
+  ///
+  /// Uses the same half-open, DST-safe day boundary as
+  /// [getReadingsForStationOnDate]: `[localMidnight(day),
+  /// localMidnight(day + 1))`, with the upper bound built via
+  /// `DateTime(y, m, d + 1)` so March/October DST transitions in
+  /// London don't drift the boundary by an hour.
+  ///
+  /// Used by the History screen's daily chart (Session 7a): the
+  /// screen loads the selected day once and shares the list across
+  /// every metric chart on the page, so switching metric-group tabs
+  /// never re-queries the database.
+  Future<List<AirQualityReading>> getReadingsForDay(DateTime day) async {
+    final start = DateTime(day.year, day.month, day.day);
+    final end = DateTime(day.year, day.month, day.day + 1);
+    final rows =
+        await (_db.select(_db.readings)
+              ..where(
+                (t) =>
+                    t.timestamp.isBiggerOrEqualValue(start) &
+                    t.timestamp.isSmallerThanValue(end),
+              )
+              ..orderBy([(t) => OrderingTerm.asc(t.timestamp)]))
+            .get();
+    return rows.map(_fromRow).toList();
+  }
+
   Future<int> countAll() async {
     final countExp = _db.readings.id.count();
     final row = await (_db.selectOnly(

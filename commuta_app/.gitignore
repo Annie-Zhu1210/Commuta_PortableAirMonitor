@@ -60,3 +60,6 @@ ios/Flutter/Secrets-Release.xcconfig
 
 # BLE UUIDs
 lib/core/constants/ble_uuids.dart
+
+# API keys
+lib/core/constants/api_keys.dart

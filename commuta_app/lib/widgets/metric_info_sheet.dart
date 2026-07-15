@@ -30,6 +30,15 @@ class MetricInfoSheet extends StatefulWidget {
   final DaqiInfo? initialDaqiInfo;
   final BandScaleSpec? scaleSpec;
 
+  /// Static explanation shown under "What is {metricLabel}?". When null,
+  /// the "coming soon" placeholder is shown instead (Session 4 will fill
+  /// these in for the device metrics).
+  final String? description;
+
+  /// Static health guidance shown under "Health recommendation". When
+  /// null, the "coming soon" placeholder is shown instead.
+  final String? healthAdvice;
+
   // Live update wiring (optional)
   final AirQualityDataSource? dataSource;
   final MetricExtractor? extractor;
@@ -41,6 +50,8 @@ class MetricInfoSheet extends StatefulWidget {
     this.initialNumericValue,
     this.initialDaqiInfo,
     this.scaleSpec,
+    this.description,
+    this.healthAdvice,
     this.dataSource,
     this.extractor,
   });
@@ -53,6 +64,8 @@ class MetricInfoSheet extends StatefulWidget {
     double? initialNumericValue,
     DaqiInfo? initialDaqiInfo,
     BandScaleSpec? scaleSpec,
+    String? description,
+    String? healthAdvice,
     AirQualityDataSource? dataSource,
     MetricExtractor? extractor,
   }) {
@@ -66,6 +79,8 @@ class MetricInfoSheet extends StatefulWidget {
         initialNumericValue: initialNumericValue,
         initialDaqiInfo:     initialDaqiInfo,
         scaleSpec:           scaleSpec,
+        description:         description,
+        healthAdvice:        healthAdvice,
         dataSource:          dataSource,
         extractor:           extractor,
       ),
@@ -159,10 +174,13 @@ class _MetricInfoSheetState extends State<MetricInfoSheet> {
               // ── What is this pollutant? ───────────────────────────────────
               _SectionHeader(title: 'What is ${widget.metricLabel}?'),
               const SizedBox(height: 8),
-              const _PlaceholderText(
-                // TODO: Fill in pollutant / metric explanation (1–2 sentences)
-                text: 'Pollutant explanation coming soon.',
-              ),
+              if (widget.description != null)
+                _BodyText(text: widget.description!)
+              else
+                const _PlaceholderText(
+                  // TODO: Fill in pollutant / metric explanation (1–2 sentences)
+                  text: 'Pollutant explanation coming soon.',
+                ),
 
               const SizedBox(height: 24),
 
@@ -186,10 +204,13 @@ class _MetricInfoSheetState extends State<MetricInfoSheet> {
               // ── Health recommendation ─────────────────────────────────────
               const _SectionHeader(title: 'Health recommendation'),
               const SizedBox(height: 8),
-              const _PlaceholderText(
-                // TODO: Fill in health recommendation for the current band
-                text: 'Health recommendation coming soon.',
-              ),
+              if (widget.healthAdvice != null)
+                _BodyText(text: widget.healthAdvice!)
+              else
+                const _PlaceholderText(
+                  // TODO: Fill in health recommendation for the current band
+                  text: 'Health recommendation coming soon.',
+                ),
             ],
           ),
         );
@@ -255,6 +276,50 @@ class _SectionHeader extends StatelessWidget {
         letterSpacing: 0.1,
       ),
     );
+  }
+}
+
+/// Real (non-placeholder) body copy for a sheet section. Plain text —
+/// no box or border — so filled-in sections read as finished content
+/// rather than stubs.
+///
+/// Supports a minimal `**bold**` markdown-style syntax for inline
+/// emphasis (e.g. site names, pollutant names). Anything between
+/// paired `**` markers renders semi-bold; everything else uses the
+/// base body style. `\n\n` in the input produces a paragraph-style
+/// visual break — the surrounding [Text.rich] treats it as two
+/// consecutive line feeds inline.
+class _BodyText extends StatelessWidget {
+  final String text;
+  const _BodyText({required this.text});
+
+  @override
+  Widget build(BuildContext context) {
+    const baseStyle = TextStyle(
+      fontSize: 13,
+      height: 1.55,
+      color: AppColours.textPrimary,
+    );
+    return Text.rich(
+      TextSpan(style: baseStyle, children: _parseBold(text)),
+    );
+  }
+
+  /// Splits [source] on `**` markers and returns alternating regular
+  /// and bold spans. Odd-indexed segments (i.e. those between paired
+  /// markers) are rendered bold. An unpaired trailing `**` degrades to
+  /// bold text through the end of the string — harmless in practice.
+  static List<TextSpan> _parseBold(String source) {
+    final parts = source.split('**');
+    return [
+      for (int i = 0; i < parts.length; i++)
+        TextSpan(
+          text: parts[i],
+          style: i.isOdd
+              ? const TextStyle(fontWeight: FontWeight.w600)
+              : null,
+        ),
+    ];
   }
 }
 

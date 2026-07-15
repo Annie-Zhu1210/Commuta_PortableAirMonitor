@@ -4,6 +4,7 @@ import '../../core/utils/daqi_utils.dart';
 import '../../services/app_services.dart';
 import '../../data/datasources/air_quality_datasource.dart';
 import '../../data/models/air_quality_reading.dart';
+import '../../data/models/local_context.dart';
 import '../../widgets/hero_aqi_card.dart';
 import '../../widgets/metric_card.dart';
 import '../../widgets/metric_info_sheet.dart';
@@ -70,7 +71,14 @@ class _HomeScreenState extends State<HomeScreen> {
     return RefreshIndicator(
       color: AppColours.accent,
       onRefresh: () async {
-        final fresh = await _dataSource.getLatestReading();
+        // Latest device reading and Local context (weather + DAQI)
+        // refresh together on one pull. refresh() never throws and
+        // is a no-op if a fetch is already in flight.
+        final results = await Future.wait([
+          _dataSource.getLatestReading(),
+          AppServices.instance.localContextService.refresh(),
+        ]);
+        final fresh = results[0] as AirQualityReading?;
         if (mounted && fresh != null) {
           setState(() => _latestReading = fresh);
         }
@@ -102,18 +110,21 @@ class _HomeScreenState extends State<HomeScreen> {
 
                 const SizedBox(height: 12),
 
-                // ── UK DAQI card (from API) ──────────────────────────────
-                _UkDaqiCard(
-                  onInfoTap: () =>
-                      _showApiInfoSheet(label: 'UK DAQI', unit: ''),
-                ),
-
-                const SizedBox(height: 12),
-
-                // ── Local Weather card (from API) ────────────────────────
-                _LocalWeatherCard(
-                  onInfoTap: () =>
-                      _showApiInfoSheet(label: 'Local Weather', unit: ''),
+                // ── Local context row (DAQI left, Weather right) ─────────
+                // IntrinsicHeight so both cards stretch to the taller one;
+                // Expanded halves the row width evenly with a 12 px gap
+                // (matches the metric grid's crossAxisSpacing above).
+                IntrinsicHeight(
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Expanded(
+                        child: _UkDaqiCard(onInfoTap: _showDaqiInfoSheet),
+                      ),
+                      const SizedBox(width: 12),
+                      const Expanded(child: _LocalWeatherCard()),
+                    ],
+                  ),
                 ),
               ]),
             ),
@@ -143,9 +154,20 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  void _showApiInfoSheet({required String label, required String unit}) {
-    // API-driven cards have no live device data — no dataSource/extractor passed.
-    MetricInfoSheet.show(context, metricLabel: label, unit: unit);
+  /// Opens the UK DAQI info sheet — description, 1–10 band scale with
+  /// the current index marked, and band-aware health advice. Weather
+  /// has no sheet (Session decision: its card carries no (i) icon).
+  void _showDaqiInfoSheet(DaqiData data) {
+    MetricInfoSheet.show(
+      context,
+      metricLabel: 'UK DAQI',
+      unit: '',
+      initialNumericValue: data.index.toDouble(),
+      initialDaqiInfo: DaqiUtils.forUkDaqiIndex(data.index),
+      scaleSpec: MetricScales.ukDaqi,
+      description: DaqiData.description(data.siteName),
+      healthAdvice: DaqiData.healthAdviceForBand(data.band),
+    );
   }
 }
 
@@ -348,89 +370,195 @@ class _MetricSpec {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// UK DAQI card (from API — placeholder until wired up)
+// UK DAQI card (live — nearest LAQN monitoring site)
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // Visually distinct from device metric cards:
 //   - full-width horizontal layout
 //   - subtle accent-tinted background
 //   - leading icon to signal "external data"
+//
+// Rebuilds whenever LocalContextService publishes a new DaqiData.
+// Null (never fetched on this device, no cache) shows the "—"
+// placeholder pill and no (i) icon — there is nothing to explain yet.
+// With data: coloured band pill ("Low · 2"), the source site's name as
+// a meta line, and an (i) icon opening the DAQI info sheet.
 
 class _UkDaqiCard extends StatelessWidget {
-  final VoidCallback onInfoTap;
+  final void Function(DaqiData data) onInfoTap;
   const _UkDaqiCard({required this.onInfoTap});
 
   @override
   Widget build(BuildContext context) {
-    return _ApiCardShell(
-      icon: Icons.public_outlined,
-      iconColour: AppColours.accentSecondary,
-      title: 'UK DAQI',
-      subtitle: 'Outdoor air quality (DEFRA)',
-      // TODO: Wire up DEFRA / outdoor AQI API. When connected, replace this
-      //       placeholder with the live DAQI band returned from the API.
-      trailing: const _PlaceholderBandPill(),
-      onInfoTap: onInfoTap,
+    return ValueListenableBuilder<DaqiData?>(
+      valueListenable: AppServices.instance.localContextService.daqi,
+      builder: (context, data, _) {
+        return _ApiCardShell(
+          icon: Icons.public_outlined,
+          iconColour: AppColours.accentSecondary,
+          title: 'UK DAQI',
+          // Site name is intentionally omitted from the card — the info
+          // sheet's description carries the site name in bold instead.
+          caption: null,
+          trailing: data == null
+              ? const _PlaceholderBandPill()
+              : _DaqiBandPill(data: data),
+          onInfoTap: data == null ? null : () => onInfoTap(data),
+        );
+      },
     );
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Local Weather card (from API — placeholder until wired up)
+// Local Weather card (live — OpenWeather current conditions)
 // ─────────────────────────────────────────────────────────────────────────────
+//
+// Rebuilds whenever LocalContextService publishes a new WeatherData.
+// Null (never fetched on this device, no cache) shows "—"; otherwise
+// "12° · Clouds" with a fetched-at meta line. No band pill — weather
+// has no DAQI band — and no (i) icon: weather needs no explanation
+// (Session decision 1).
 
 class _LocalWeatherCard extends StatelessWidget {
-  final VoidCallback onInfoTap;
-  const _LocalWeatherCard({required this.onInfoTap});
+  const _LocalWeatherCard();
+
+  static String _formatUpdatedAt(DateTime t) {
+    final local = t.toLocal();
+    final hh = local.hour.toString().padLeft(2, '0');
+    final mm = local.minute.toString().padLeft(2, '0');
+    return 'Updated $hh:$mm';
+  }
 
   @override
   Widget build(BuildContext context) {
-    return _ApiCardShell(
-      icon: Icons.wb_cloudy_outlined,
-      iconColour: AppColours.accentSecondary,
-      title: 'Local Weather',
-      subtitle: 'Temperature, conditions',
-      // TODO: Wire up weather API (OpenWeather, Met Office, etc.).
-      //       No band pill — weather has no DAQI band.
-      trailing: const Text(
-        '—',
-        style: TextStyle(
-          fontSize: 20,
-          fontWeight: FontWeight.w400,
-          color: AppColours.textSecondary,
-        ),
-      ),
-      onInfoTap: onInfoTap,
+    return ValueListenableBuilder<WeatherData?>(
+      valueListenable: AppServices.instance.localContextService.weather,
+      builder: (context, data, _) {
+        return _ApiCardShell(
+          icon: Icons.wb_cloudy_outlined,
+          iconColour: AppColours.accentSecondary,
+          title: 'Local Weather',
+          caption: data == null ? null : _formatUpdatedAt(data.fetchedAt),
+          trailing: FittedBox(
+            fit: BoxFit.scaleDown,
+            child: Text(
+              data == null
+                  ? '—'
+                  : '${data.tempCelsius}° · ${data.condition}',
+              maxLines: 1,
+              style: TextStyle(
+                fontSize: 24,
+                fontWeight: data == null ? FontWeight.w400 : FontWeight.w600,
+                color: data == null
+                    ? AppColours.textSecondary
+                    : AppColours.textPrimary,
+              ),
+            ),
+          ),
+          onInfoTap: null,
+        );
+      },
     );
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Shared shell for API-driven cards — full-width, horizontal, accent tint
+// Shared shell for API-driven cards — fully symmetric, accent tint
 // ─────────────────────────────────────────────────────────────────────────────
+//
+// Composition ("Alt A" symmetric medallion, sized for a half-width grid):
+//   • Icon (44 px circle)  — top, centred
+//   • Title                — 15 pt semi-bold, centred
+//   • Trailing (hero)      — the focal value: DAQI band pill, or the big
+//                             weather text. Both use FittedBox internally
+//                             so extreme values ("Very High · 10",
+//                             "22° · Thunderstorm") scale down instead of
+//                             clipping the ~133 px content width.
+//   • Caption              — small centred supporting line (currently used
+//                             by the weather card for "Updated hh:mm").
+//                             Omitted when null.
+//   • (i) info icon        — absolutely positioned top-right so it doesn't
+//                             disturb the vertical centre-line. Omitted
+//                             when [onInfoTap] is null.
+//
+// The content column is wrapped in [Center] so, when the parent
+// [IntrinsicHeight] Row stretches the shorter card to match the taller
+// one, the shorter card's content sits vertically centred in the extra
+// space rather than clinging to the top.
 
 class _ApiCardShell extends StatelessWidget {
   final IconData icon;
   final Color iconColour;
   final String title;
-  final String subtitle;
+  final String? caption;
   final Widget trailing;
-  final VoidCallback onInfoTap;
+  final VoidCallback? onInfoTap;
 
   const _ApiCardShell({
     required this.icon,
     required this.iconColour,
     required this.title,
-    required this.subtitle,
+    this.caption,
     required this.trailing,
     required this.onInfoTap,
   });
 
   @override
   Widget build(BuildContext context) {
+    final content = Column(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // ── Icon ───────────────────────────────────────────────────────────
+        Container(
+          width: 44,
+          height: 44,
+          decoration: BoxDecoration(
+            color: iconColour.withValues(alpha: 0.15),
+            shape: BoxShape.circle,
+          ),
+          child: Icon(icon, size: 22, color: iconColour),
+        ),
+
+        const SizedBox(height: 12),
+
+        // ── Title ──────────────────────────────────────────────────────────
+        Text(
+          title,
+          textAlign: TextAlign.center,
+          style: const TextStyle(
+            fontSize: 15,
+            fontWeight: FontWeight.w600,
+            color: AppColours.textPrimary,
+            letterSpacing: 0.1,
+          ),
+        ),
+
+        const SizedBox(height: 14),
+
+        // ── Hero value ─────────────────────────────────────────────────────
+        trailing,
+
+        // ── Caption (optional) ─────────────────────────────────────────────
+        if (caption != null) ...[
+          const SizedBox(height: 10),
+          Text(
+            caption!,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+              color: AppColours.accentSecondary.withValues(alpha: 0.9),
+            ),
+          ),
+        ],
+      ],
+    );
+
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
         // Subtle tint to differentiate from device metric cards
         color: AppColours.accentSecondary.withValues(alpha: 0.06),
@@ -440,84 +568,81 @@ class _ApiCardShell extends StatelessWidget {
           width: 1,
         ),
       ),
-      child: Row(
+      child: Stack(
         children: [
-          // ── Leading icon in a soft circle ────────────────────────────────
-          Container(
-            width: 40,
-            height: 40,
-            decoration: BoxDecoration(
-              color: iconColour.withValues(alpha: 0.15),
-              shape: BoxShape.circle,
-            ),
-            child: Icon(icon, size: 20, color: iconColour),
-          ),
-
-          const SizedBox(width: 14),
-
-          // ── Title + subtitle ──────────────────────────────────────────────
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  title,
-                  style: const TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600,
-                    color: AppColours.textPrimary,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  subtitle,
-                  style: const TextStyle(
-                    fontSize: 11,
+          // Center wrapper: when the sibling card in the Row is taller,
+          // IntrinsicHeight stretches this Container to match, and Center
+          // pushes the (naturally-sized) Column into the vertical middle
+          // instead of leaving it stuck at the top.
+          Center(child: content),
+          if (onInfoTap != null)
+            Positioned(
+              top: 0,
+              right: 0,
+              child: GestureDetector(
+                onTap: onInfoTap,
+                behavior: HitTestBehavior.opaque,
+                child: const Padding(
+                  padding: EdgeInsets.all(4),
+                  child: Icon(
+                    Icons.info_outline,
+                    size: 18,
                     color: AppColours.textSecondary,
                   ),
                 ),
-              ],
-            ),
-          ),
-
-          // ── Trailing value / band pill ────────────────────────────────────
-          trailing,
-
-          const SizedBox(width: 6),
-
-          // ── (i) info icon ─────────────────────────────────────────────────
-          GestureDetector(
-            onTap: onInfoTap,
-            behavior: HitTestBehavior.opaque,
-            child: const Padding(
-              padding: EdgeInsets.all(4),
-              child: Icon(
-                Icons.info_outline,
-                size: 18,
-                color: AppColours.textSecondary,
               ),
             ),
-          ),
         ],
       ),
     );
   }
 }
 
-/// Placeholder pill shown on the UK DAQI card before the API is wired up.
-/// Once the API returns a value, replace with a real [_BandPill] coloured
-/// by [DaqiUtils.forUkDaqiIndex].
+/// Live band pill on the UK DAQI card — coloured by severity band,
+/// showing "{band} · {index}" (e.g. "Low · 2"). Band label and colour
+/// come from [DaqiUtils.forUkDaqiIndex], the same source the info
+/// sheet uses, so pill and sheet can never disagree.
+class _DaqiBandPill extends StatelessWidget {
+  final DaqiData data;
+  const _DaqiBandPill({required this.data});
+
+  @override
+  Widget build(BuildContext context) {
+    final info = DaqiUtils.forUkDaqiIndex(data.index);
+    return FittedBox(
+      fit: BoxFit.scaleDown,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        decoration: BoxDecoration(
+          color: info.colour.withValues(alpha: 0.15),
+          borderRadius: BorderRadius.circular(24),
+        ),
+        child: Text(
+          '${info.label} · ${data.index}',
+          maxLines: 1,
+          style: TextStyle(
+            fontSize: 16,
+            fontWeight: FontWeight.w600,
+            color: info.colour,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Placeholder pill shown on the UK DAQI card while no DAQI value has
+/// ever been fetched on this device (no live fetch yet and no cache).
 class _PlaceholderBandPill extends StatelessWidget {
   const _PlaceholderBandPill();
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       decoration: BoxDecoration(
         color: AppColours.textSecondary.withValues(alpha: 0.1),
-        borderRadius: BorderRadius.circular(20),
+        borderRadius: BorderRadius.circular(24),
       ),
       child: const Row(
         mainAxisSize: MainAxisSize.min,
@@ -525,7 +650,7 @@ class _PlaceholderBandPill extends StatelessWidget {
           Text(
             '—',
             style: TextStyle(
-              fontSize: 11,
+              fontSize: 16,
               fontWeight: FontWeight.w600,
               color: AppColours.textSecondary,
             ),

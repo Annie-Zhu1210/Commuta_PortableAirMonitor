@@ -7,6 +7,7 @@ import '../data/datasources/air_quality_datasource.dart';
 import '../data/datasources/ble_manager.dart';
 import 'device_connection.dart';
 import 'device_persistence_service.dart';
+import 'local_context_service.dart';
 import 'readings_repository.dart';
 import 'station_classification_service.dart';
 import 'tfl_map_data.dart';
@@ -15,10 +16,10 @@ import 'tfl_map_data.dart';
 ///
 /// Holds the shared [AirQualityDataSource], the sibling
 /// [DeviceConnection], the [AppDatabase], the [ReadingsRepository],
-/// the [StationClassificationService], and the
-/// [DevicePersistenceService], so every screen reads from the same
-/// instances and every reading lands in one durable store.
-/// Initialised once in `main()` before `runApp`.
+/// the [StationClassificationService], the
+/// [DevicePersistenceService], and the [LocalContextService], so every
+/// screen reads from the same instances and every reading lands in one
+/// durable store. Initialised once in `main()` before `runApp`.
 ///
 /// Pattern mirrors [TflMapData.instance].
 class AppServices {
@@ -67,6 +68,13 @@ class AppServices {
   /// needs those values to survive a force-quit.
   late final DevicePersistenceService devicePersistence;
 
+  /// Fetches and publishes the Home screen's "Local context" data —
+  /// current weather (OpenWeather) and the UK DAQI at the nearest
+  /// LAQN monitoring site. Owns its own refresh cadence (foreground,
+  /// 15-minute periodic, and manual pull-to-refresh) and re-seeds its
+  /// notifiers from a SharedPreferences cache on cold start.
+  late final LocalContextService localContextService;
+
   /// Idempotent app-startup bootstrap. Call once from `main()` after
   /// `WidgetsFlutterBinding.ensureInitialized()` and before `runApp`.
   ///
@@ -94,6 +102,10 @@ class AppServices {
   ///      after the manager. It reuses the already-loaded `prefs`
   ///      instance and attaches listeners to the manager's
   ///      last-seen listenable and status stream.
+  ///   8. (Local context session) [LocalContextService] is created
+  ///      and started last — it has no dependencies on any other
+  ///      service and only needs the shared `prefs` instance for its
+  ///      cold-start cache seeding.
   Future<void> init() async {
     if (_initialised) return;
 
@@ -168,6 +180,18 @@ class AppServices {
     // Location permission must not be requested in main() before any
     // UI exists — the main scaffold calls it once it is on screen.
 
+    // ── Local context (weather + UK DAQI) ────────────────────────
+    // Started last: no dependencies on other services. Seeds its
+    // notifiers synchronously from the `prefs` cache, then fires its
+    // first fetch in the background — init() is not blocked on the
+    // network. Its own position handling degrades gracefully if
+    // location permission has not been granted yet (weather falls
+    // back to the central-London default; DAQI keeps its cached
+    // value), so starting before the scaffold's permission prompt
+    // is safe.
+    localContextService = LocalContextService(prefs);
+    localContextService.start();
+
     _initialised = true;
   }
 
@@ -178,6 +202,7 @@ class AppServices {
     // Reverse order of creation: services that only listen come
     // first, then the repository (which closes the database), then
     // the data source itself.
+    localContextService.dispose();
     await classificationService.dispose();
     await devicePersistence.dispose();
     await readingsRepository.dispose(); // also closes the database

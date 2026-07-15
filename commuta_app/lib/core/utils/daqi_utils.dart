@@ -414,4 +414,19 @@ class MetricScales {
     showLeftEdge:     true,
     showRightEdge:    true,
   );
+
+  // ── UK DAQI (official 1–10 index) ──────────────────────────────────────────
+  // Used by the UK DAQI card's info sheet. The index is bounded at both
+  // ends (1 and 10 are hard limits, unlike the open-ended PM bands), so
+  // both edges are shown. Pairs with [DaqiUtils.forUkDaqiIndex].
+  static const BandScaleSpec ukDaqi = BandScaleSpec(
+    visualMin:        1,
+    visualMax:        10,
+    innerBoundaries:  [3, 6, 9],
+    bandLabels:       ['Low', 'Moderate', 'High', 'Very High'],
+    bandColours:      _fourBandColours,
+    unit:             '',
+    showLeftEdge:     true,
+    showRightEdge:    true,
+  );
 }

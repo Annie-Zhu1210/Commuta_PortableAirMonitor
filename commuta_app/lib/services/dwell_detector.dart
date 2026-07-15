@@ -141,6 +141,22 @@ class DwellDetector {
     }
   }
 
+  /// Clears all active cluster state without closing the event stream.
+  ///
+  /// Called by the Google Map view on midnight rollover: yesterday's
+  /// markers are wiped, and the detector must not treat the first
+  /// reading of the new day as a continuation of a cluster whose
+  /// anchor belongs to yesterday. The collection counter is
+  /// deliberately *not* reset — collection IDs (and therefore marker
+  /// and notifier keys) stay unique across day boundaries within a
+  /// single app session.
+  void reset() {
+    _anchor = null;
+    _clusterStart = null;
+    _clusterReadings.clear();
+    _activeCollectionId = null;
+  }
+
   void _startNewCluster(AirQualityReading reading, Position position) {
     _anchor = position;
     _clusterStart = reading.timestamp;

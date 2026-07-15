@@ -20,6 +20,14 @@ import '../data/models/air_quality_reading.dart';
 /// classification beats the raw write, whether the raw write came
 /// from the live or buffered stream, or the other way round.
 ///
+/// The Google Map view calls [setGpsForReading] (same UPSERT shape)
+/// to attach the phone's coordinates to unclassified live readings
+/// that pass the plotting accuracy gate. A reading is therefore
+/// located by exactly one of two mutually exclusive mechanisms:
+/// a station tag (TfL map) or a GPS coordinate pair (Google map) —
+/// never both. [classifyReading] enforces this by nulling the GPS
+/// columns whenever it tags a row.
+///
 /// Lifecycle owned by `AppServices`.
 class ReadingsRepository {
   ReadingsRepository(this._db, this._dataSource);
@@ -52,6 +60,14 @@ class ReadingsRepository {
   /// if the raw reading hasn't been persisted yet, this writes the
   /// complete row including the classification. If it has, this
   /// updates only the classification fields.
+  ///
+  /// The update also nulls `gpsLat` / `gpsLng`. The station tag *is*
+  /// the location for a classified reading, and the Google map's
+  /// hydration query keys off `gpsLat IS NOT NULL` — a row that
+  /// carried both would misrepresent one surface or the other. In
+  /// practice the map view's unclassified gate means the two writers
+  /// never act on the same reading; this is belt-and-braces for any
+  /// exotic ordering, so classification always wins.
   Future<void> classifyReading({
     required AirQualityReading reading,
     required String stationId,
@@ -68,6 +84,43 @@ class ReadingsRepository {
             (_) => ReadingsCompanion(
               stationId: Value(stationId),
               lineId: Value(lineId),
+              gpsLat: const Value(null),
+              gpsLng: const Value(null),
+            ),
+            target: [_db.readings.sequenceNumber, _db.readings.timestamp],
+          ),
+        );
+  }
+
+  /// Called by the Google Map view for a live reading that has passed
+  /// both plotting gates (GPS accuracy within threshold, no station
+  /// currently tagged). Idempotent UPSERT mirroring [classifyReading]:
+  /// if the raw reading hasn't been persisted yet — the map's listener
+  /// beat the persistence listener on the shared broadcast stream —
+  /// this writes the complete row including the coordinates. If it
+  /// has, this updates only the GPS columns.
+  ///
+  /// Invariant maintained: `gpsLat` is populated ⟺ the reading
+  /// appeared as a marker on the Google map. Buffered readings never
+  /// come through here (the map only subscribes to the live stream),
+  /// so historical catch-up records — whose arrival position says
+  /// nothing about where they were sampled — never gain coordinates.
+  Future<void> setGpsForReading(
+    AirQualityReading reading, {
+    required double lat,
+    required double lng,
+  }) async {
+    final companion = _toCompanion(
+      reading,
+    ).copyWith(gpsLat: Value(lat), gpsLng: Value(lng));
+    await _db
+        .into(_db.readings)
+        .insert(
+          companion,
+          onConflict: DoUpdate(
+            (_) => ReadingsCompanion(
+              gpsLat: Value(lat),
+              gpsLng: Value(lng),
             ),
             target: [_db.readings.sequenceNumber, _db.readings.timestamp],
           ),
@@ -160,6 +213,40 @@ class ReadingsRepository {
         await (_db.select(_db.readings)
               ..where(
                 (t) =>
+                    t.timestamp.isBiggerOrEqualValue(start) &
+                    t.timestamp.isSmallerThanValue(end),
+              )
+              ..orderBy([(t) => OrderingTerm.asc(t.timestamp)]))
+            .get();
+    return rows.map(_fromRow).toList();
+  }
+
+  /// Returns every *unclassified* reading with persisted GPS
+  /// coordinates whose timestamp falls on [day] in local time —
+  /// `stationId IS NULL AND gpsLat IS NOT NULL` — ordered ascending
+  /// by timestamp. Same half-open, DST-safe day boundary as
+  /// [getReadingsForDay].
+  ///
+  /// Used by the Google Map view's hydration on `initState`: the
+  /// returned rows are replayed through the `DwellDetector` in
+  /// timestamp order to reconstruct today's single and collection
+  /// markers after an app restart. Because [setGpsForReading] only
+  /// writes coordinates for readings that actually appeared on the
+  /// map, this query restores exactly the markers the user saw —
+  /// no more, no less. Rows from before this feature landed have
+  /// null GPS columns and are naturally invisible here (self-healing;
+  /// no backfill required).
+  Future<List<AirQualityReading>> getUnclassifiedGpsReadingsForDay(
+    DateTime day,
+  ) async {
+    final start = DateTime(day.year, day.month, day.day);
+    final end = DateTime(day.year, day.month, day.day + 1);
+    final rows =
+        await (_db.select(_db.readings)
+              ..where(
+                (t) =>
+                    t.stationId.isNull() &
+                    t.gpsLat.isNotNull() &
                     t.timestamp.isBiggerOrEqualValue(start) &
                     t.timestamp.isSmallerThanValue(end),
               )

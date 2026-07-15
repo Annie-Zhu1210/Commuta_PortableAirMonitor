@@ -8,8 +8,10 @@ import '../core/utils/daqi_utils.dart';
 /// Builds AQI marker bitmaps for the Google Map view.
 ///
 /// Each marker is a small coloured circle with the numeric AQI value
-/// in the centre. The colour comes from the DAQI band; the number
-/// comes from the placeholder overall AQI computation.
+/// in the centre. The colour comes from the severity band and the
+/// number is the 0–100 score — both supplied by `MapAqiScore`, which
+/// delegates to the Home hero's scoring so the two surfaces always
+/// agree.
 ///
 /// Bitmaps are cached by "${band}_$displayValue" since the same
 /// (band, value) pair always produces the same bitmap.
@@ -54,14 +56,18 @@ class AqiMarkerBuilder {
       Paint()..color = _colourForBand(band),
     );
 
-    // Number
+    // Number. The hero score is clamped to 0–100, so the only
+    // three-digit value is 100 — shrink the font just for that case
+    // so it sits inside the disc with the same visual weight as the
+    // one- and two-digit values (which keep the original 0.32 ratio).
+    final fontRatio = displayValue >= 100 ? 0.27 : 0.32;
     final tp = TextPainter(
       text: TextSpan(
         text: '$displayValue',
         style: TextStyle(
           color: Colors.white,
           fontWeight: FontWeight.w700,
-          fontSize: pixelSize * 0.32,
+          fontSize: pixelSize * fontRatio,
           fontFamily: 'Inter',
         ),
       ),
@@ -92,8 +98,10 @@ class AqiMarkerBuilder {
 
   /// Builds the collection-marker bitmap: three overlapping coloured
   /// discs, no number in the centre, dominant colour = worst band
-  /// across the collection's readings. The cache key uses only the
-  /// band, so appending readings without a band change is free.
+  /// across the collection's readings (each reading's band coming
+  /// from `MapAqiScore`, so single and collection markers agree).
+  /// The cache key uses only the band, so appending readings without
+  /// a band change is free.
   static Future<BitmapDescriptor> buildCollection({
     required DaqiBand dominantBand,
     double devicePixelRatio = 3.0,

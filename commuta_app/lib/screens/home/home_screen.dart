@@ -5,6 +5,7 @@ import '../../services/app_services.dart';
 import '../../data/datasources/air_quality_datasource.dart';
 import '../../data/models/air_quality_reading.dart';
 import '../../data/models/local_context.dart';
+import '../../data/models/pollutant_info.dart';
 import '../../widgets/hero_aqi_card.dart';
 import '../../widgets/metric_card.dart';
 import '../../widgets/metric_info_sheet.dart';
@@ -142,6 +143,11 @@ class _HomeScreenState extends State<HomeScreen> {
     required BandScaleSpec? scaleSpec,
     required MetricExtractor extractor,
   }) {
+    // Look up static info-sheet copy for this metric. Returns null for
+    // metrics whose copy hasn't been written yet, in which case the
+    // sheet falls back to its "coming soon" placeholder boxes.
+    final content = _pollutantContentFor(infoSheetLabel, daqiInfo?.band);
+
     MetricInfoSheet.show(
       context,
       metricLabel: infoSheetLabel,
@@ -149,9 +155,55 @@ class _HomeScreenState extends State<HomeScreen> {
       initialNumericValue: numericValue,
       initialDaqiInfo: daqiInfo,
       scaleSpec: scaleSpec,
+      description: content?.description,
+      healthAdvice: content?.healthAdvice,
       dataSource: _dataSource,
       extractor: extractor,
     );
+  }
+
+  /// Resolves the static description and band-aware health advice for
+  /// a device metric by its info-sheet label.
+  ///
+  /// Returns null when either:
+  ///   • the metric has no live band (null [DaqiInfo], so no band-aware
+  ///     advice can be resolved), or
+  ///   • copy for the metric hasn't been written yet (PM1, CO₂,
+  ///     temperature, humidity, air pressure, pressure change).
+  ///
+  /// Health advice is captured at open time from the current [band]
+  /// and does not update if the reading's band changes while the
+  /// sheet is open — matching the UK DAQI card's existing behaviour.
+  /// The header value, colour and scale marker still update live.
+  ({String description, String healthAdvice})? _pollutantContentFor(
+    String infoSheetLabel,
+    DaqiBand? band,
+  ) {
+    if (band == null) return null;
+    switch (infoSheetLabel) {
+      case 'PM2.5':
+        return (
+          description: Pm25Info.description,
+          healthAdvice: Pm25Info.healthAdviceForBand(band),
+        );
+      case 'PM10':
+        return (
+          description: Pm10Info.description,
+          healthAdvice: Pm10Info.healthAdviceForBand(band),
+        );
+      case 'VOC Index':
+        return (
+          description: VocIndexInfo.description,
+          healthAdvice: VocIndexInfo.healthAdviceForBand(band),
+        );
+      case 'NOx Index':
+        return (
+          description: NoxIndexInfo.description,
+          healthAdvice: NoxIndexInfo.healthAdviceForBand(band),
+        );
+      default:
+        return null;
+    }
   }
 
   /// Opens the UK DAQI info sheet — description, 1–10 band scale with

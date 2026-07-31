@@ -18,6 +18,8 @@
 
 #include <esp_sleep.h>
 #include <driver/rtc_io.h>
+#include <esp_random.h>   // esp_random() hardware RNG for boot_epoch
+#include <Preferences.h>  // NVS-backed persistence for boot_epoch
 
 #include "ble.h"
 #include "storage.h"
@@ -74,10 +76,31 @@ uint16_t latestCo2 = 0;
 float latestT = 25.0f;
 float latestRh = 50.0f;
 float latestPressure = 0.0f;
+float latestDps368Temp = 25.0f;  // DPS368 ambient temp; reported over BLE (SCD40 temp still logged for SGP41 comp)
 bool haveScdReading = false;
 
 // ---------- BLE sample state ----------
 uint32_t sampleSequence = 0;  // increments every BLE sample; restored from storage on boot
+
+// ---------- Boot epoch (sample dedup) ----------
+// A random 32-bit ID generated once per firmware install and persisted in
+// NVS. Stamped onto every sample so the app dedupes on (boot_epoch,
+// sequence). Survives ordinary reboots and "Disabled" sketch uploads; only a
+// full flash erase (which wipes NVS) forces a new one - which is exactly when
+// we WANT a new epoch, because the sample sequence also resets to 0 then, so
+// (new_epoch, 0..) can never collide with previously-synced (old_epoch, N).
+Preferences g_prefs;
+uint32_t bootEpoch = 0;
+
+// ---------- SCD40 pressure compensation (fed from DPS368) ----------
+// The SCD40 uses ambient pressure in its internal CO2 physics path, so this
+// correction belongs in firmware (post-hoc correction would be lossy). We
+// push the latest DPS368 pressure to the SCD40 at least every 30 s, or sooner
+// whenever it moves more than 5 hPa (e.g. train pressure transients).
+unsigned long lastPressureCompMs = 0;
+float lastPressureCompHpa = 0.0f;
+const unsigned long PRESSURE_COMP_INTERVAL_MS = 30000;
+const float PRESSURE_COMP_DELTA_HPA = 5.0f;
 
 // ---------- print / sample cadence ----------
 unsigned long lastPrint = 0;
@@ -168,17 +191,47 @@ uint16_t temperatureToTicks(float t) {
   return (uint16_t)(((t + 45.0f) * 65535.0f) / 175.0f);
 }
 
-// Rough battery percentage from GPIO35 (internal Vbat/2 divider on the HUZZAH32).
-// First-pass linear map only: ESP32 ADC is non-linear near the rails and the LiPo
-// discharge curve isn't actually linear either. Improve once we have bench data.
-uint8_t readBatteryPercent() {
+// Raw battery voltage from GPIO35 (internal Vbat/2 divider on the HUZZAH32).
+// We now send this raw value over BLE (vbat_mv) and let the app derive SOC
+// from an empirically-calibrated OCV table (Phases 4-5). Deliberately no
+// smoothing or percentage mapping here: keeping the wire value raw makes the
+// dataset reproducible and lets the SOC algorithm be revised without a
+// re-flash. Caveat: the 3.3 V reference is nominal and the ESP32 ADC is
+// non-linear, so this is an ADC-derived estimate rather than a lab-grade
+// voltage. That's fine - the app's OCV table is built against exactly this
+// function's output, so any consistent scaling error is absorbed by the
+// calibration. (If true absolute mV is ever needed, swap in esp_adc_cal.)
+uint16_t readBatteryMillivolts() {
   int raw = analogRead(PIN_BATTERY_ADC);
-  float vbat = (raw / 4095.0f) * 3.3f * 2.0f;
-  int pct = (int)((vbat - 3.3f) / (4.2f - 3.3f) * 100.0f);
+  float vbat = (raw / 4095.0f) * 3.3f * 2.0f;  // *2 undoes the on-board /2 divider
+  uint16_t mv = (uint16_t)(vbat * 1000.0f + 0.5f);
+  Serial.printf("Battery: raw=%d vbat=%.3fV (%u mV)\n", raw, vbat, mv);
+  return mv;
+}
+
+// Coarse percentage for the Status characteristic ONLY - a rough live UI
+// indicator, never research data. Real SOC is computed app-side from vbat_mv.
+// Kept so the Status wire format (and the app's Status parser) stays unchanged.
+static uint8_t coarseBatteryPct(uint16_t mv) {
+  long pct = ((long)mv - 3300) * 100 / (4200 - 3300);
   if (pct < 0) pct = 0;
   if (pct > 100) pct = 100;
-  Serial.printf("Battery: raw=%d vbat=%.2fV pct=%d\n", raw, vbat, pct);
   return (uint8_t)pct;
+}
+
+// Generate-or-restore the per-install boot epoch. Called once early in setup.
+static void initBootEpoch() {
+  g_prefs.begin("commuta", false);  // namespace "commuta", read-write
+  bootEpoch = g_prefs.getUInt("epoch", 0);
+  if (bootEpoch == 0) {
+    bootEpoch = esp_random();       // 32-bit hardware RNG
+    if (bootEpoch == 0) bootEpoch = 1;  // 0 is our "unset" sentinel; avoid it
+    g_prefs.putUInt("epoch", bootEpoch);
+    Serial.printf("boot_epoch: generated new %08X\n", (unsigned)bootEpoch);
+  } else {
+    Serial.printf("boot_epoch: restored %08X\n", (unsigned)bootEpoch);
+  }
+  g_prefs.end();
 }
 
 void sampleSgp41() {
@@ -281,7 +334,7 @@ static void onBtnLongPress() {
   status.oldest_buffered_seq = oldestSeq;
   status.newest_buffered_seq = newestSeq;
   status.buffered_count = bufferedCount;
-  status.battery_pct = readBatteryPercent();
+  status.battery_pct = coarseBatteryPct(readBatteryMillivolts());
   status.flags = COMMUTA_FLAG_SHUTTING_DOWN;
   commutaBleUpdateStatus(status);
   Serial.printf("Shutdown: sent SHUTTING_DOWN status (buf=%u, newest=%u)\n",
@@ -358,6 +411,9 @@ void setup() {
     sampleSequence = commutaStorageNextSequence();
     Serial.printf("storage: resuming at sequence %u\n", (unsigned)sampleSequence);
   }
+
+  // Boot epoch: the other half of the (boot_epoch, sequence) dedup key.
+  initBootEpoch();
 
   // Sensor inits. These still happen unconditionally — calling them on an
   // absent sensor is harmless (the I2C NACK is silently ignored by the
@@ -474,13 +530,55 @@ void loop() {
 
   // --- DPS368 ---
   Adafruit_Sensor* dps_pressure = dps.getPressureSensor();
-  sensors_event_t pe;
+  Adafruit_Sensor* dps_temp = dps.getTemperatureSensor();
+  sensors_event_t pe, te;
+  // NOTE: gate on pressureAvailable() FIRST. In the Adafruit DPS310/DPS368
+  // driver a single getEvent() reads the whole PSR+TMP register block and
+  // clears BOTH data-ready flags, so checking temperatureAvailable() before
+  // the pressure read would clear PRS_RDY and make us skip pressure. Reading
+  // pressure first, then temperature, keeps both readings valid: the temp
+  // getEvent() below re-reads the (still-fresh) register block.
   if (dps.pressureAvailable()) {
     dps_pressure->getEvent(&pe);
     latestPressure = pe.pressure;
     Serial.print("Pressure: ");
     Serial.print(pe.pressure);
     Serial.println(" hPa");
+
+    // DPS368 ambient temperature. Unlike the SCD40 (NDIR self-heater, whose
+    // reading drifts upward as the enclosure warms), the DPS368 has no
+    // internal heater and tracks sensor-chamber air temperature honestly, so
+    // it is what we report as ambient over BLE. The DPS368 was already
+    // measuring temperature internally for its own pressure compensation;
+    // this just surfaces that value. SCD40 temperature is still logged in
+    // the sample (feeds SGP41 T/RH comp + methodology metadata).
+    dps_temp->getEvent(&te);
+    latestDps368Temp = te.temperature;
+    Serial.print("DPS Temp: ");
+    Serial.print(te.temperature);
+    Serial.println(" C");
+
+    // Feed ambient pressure to the SCD40 for CO2 compensation. The SCD40
+    // applies this internally until changed, so we refresh at least every
+    // PRESSURE_COMP_INTERVAL_MS, or sooner on a >5 hPa move. setAmbientPressure
+    // takes Pa (per the SensirionI2cScd4x header) and may be sent during
+    // periodic measurement. latestPressure is logged in every sample below,
+    // so the compensation reference is recorded for reproducibility.
+    bool due = (millis() - lastPressureCompMs) >= PRESSURE_COMP_INTERVAL_MS;
+    bool jumped = fabsf(latestPressure - lastPressureCompHpa) >= PRESSURE_COMP_DELTA_HPA;
+    if (latestPressure > 0.0f && (due || jumped)) {
+      uint32_t pa = (uint32_t)(latestPressure * 100.0f + 0.5f);  // hPa -> Pa
+      int16_t perr = scd4x.setAmbientPressure(pa);
+      if (perr) {
+        Serial.printf("SCD40: setAmbientPressure(%u Pa) err %d\n",
+                      (unsigned)pa, perr);
+      } else {
+        Serial.printf("SCD40: ambient pressure -> %u Pa (%.1f hPa)\n",
+                      (unsigned)pa, latestPressure);
+        lastPressureCompMs = millis();
+        lastPressureCompHpa = latestPressure;
+      }
+    }
   } else {
     Serial.println("DPS368: No reading yet");
   }
@@ -502,9 +600,11 @@ void loop() {
   }
 
   // --- Build the sample, persist it, and notify BLE ---
-  uint8_t batteryPct = readBatteryPercent();
+  uint16_t vbatMv = readBatteryMillivolts();
 
   CommutaSample sample = {};
+  sample.struct_version = COMMUTA_STRUCT_VERSION;
+  sample.boot_epoch = bootEpoch;
   sample.sequence = sampleSequence++;
   sample.pm1 = latestPm1;
   sample.pm25 = latestPm25;
@@ -513,12 +613,13 @@ void loop() {
   sample.temperature = latestT;
   sample.humidity = latestRh;
   sample.pressure = latestPressure;
+  sample.dps368_temp_c = latestDps368Temp;
   sample.sraw_voc = srawVoc;
   sample.sraw_nox = srawNox;
   sample.voc_index = (int16_t)vocIndex;
   sample.nox_index = (int16_t)noxIndex;
+  sample.vbat_mv = vbatMv;
   sample.flags = conditioning ? COMMUTA_FLAG_CONDITIONING : 0;
-  sample.battery_pct = batteryPct;
 
   // Persist to flash first, then notify the Live characteristic.
   commutaStorageAppend(sample);
@@ -534,13 +635,13 @@ void loop() {
   status.oldest_buffered_seq = oldestSeq;
   status.newest_buffered_seq = newestSeq;
   status.buffered_count = bufferedCount;
-  status.battery_pct = batteryPct;
+  status.battery_pct = coarseBatteryPct(vbatMv);
   status.flags = sample.flags & COMMUTA_FLAG_CONDITIONING;
   commutaBleUpdateStatus(status);
 
   Serial.print("Bat:  ");
-  Serial.print(batteryPct);
-  Serial.print(" %  Buf: ");
+  Serial.print(vbatMv);
+  Serial.print(" mV  Buf: ");
   Serial.print(bufferedCount);
   Serial.print("  BLE: ");
   Serial.println(commutaBleIsConnected() ? "connected" : "advertising");

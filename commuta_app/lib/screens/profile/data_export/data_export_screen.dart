@@ -10,11 +10,18 @@ import '../../../services/readings_repository.dart';
 
 /// Profile → Data → Export data sub-page.
 ///
-/// Two buttons — "All data" and "Today" — generate a CSV covering
-/// the corresponding range and hand it off to the iOS share sheet
-/// via `share_plus`. Each button carries a live row count preview
-/// fetched on screen open, so Annie knows what she's about to
-/// export before committing.
+/// Three buttons — "All data", "Today", and "Battery characterisation
+/// (dev)" — generate a CSV covering the corresponding range and hand
+/// it off to the iOS share sheet via `share_plus`. Each button carries
+/// a live row count preview fetched on screen open, so Annie knows
+/// what she's about to export before committing.
+///
+/// The characterisation button is a Phase 4b/Session 3 development
+/// aid: it exports every reading carrying a battery-voltage sample,
+/// ordered by (bootEpoch, sequenceNumber), feeding the empirical OCV
+/// table that replaces the current firmware-computed battery gauge.
+/// Not intended for the exhibition build's end users; kept alongside
+/// the primary exports so the same share-sheet handoff can be reused.
 ///
 /// Empty ranges are detected before any file is generated; an
 /// inline message replaces the share handoff so an empty CSV
@@ -31,6 +38,10 @@ class _DataExportScreenState extends State<DataExportScreen> {
       'No data to export in this range — pair the device and '
       'collect some readings first.';
 
+  static const String _emptyCharacterisationMessage =
+      'No battery-characterisation data yet — run a discharge and '
+      'let the device sync first.';
+
   final ReadingsRepository _repo =
       AppServices.instance.readingsRepository;
 
@@ -38,16 +49,19 @@ class _DataExportScreenState extends State<DataExportScreen> {
   /// the buttons show "— readings" until the first load completes.
   int? _allCount;
   int? _todayCount;
+  int? _characterisationCount;
 
-  /// Independent busy flags so both buttons can disable together
-  /// while either is running.
+  /// Independent busy flags so all three buttons can disable together
+  /// while any one is running.
   bool _busyAll = false;
   bool _busyToday = false;
+  bool _busyCharacterisation = false;
 
   /// Inline messages shown directly under each button. Cleared at
   /// the start of every new export attempt.
   String? _messageAll;
   String? _messageToday;
+  String? _messageCharacterisation;
 
   @override
   void initState() {
@@ -61,11 +75,13 @@ class _DataExportScreenState extends State<DataExportScreen> {
       final results = await Future.wait<int>([
         _repo.countAll(),
         _repo.countBetween(range.start, range.end),
+        _repo.countCharacterisation(),
       ]);
       if (!mounted) return;
       setState(() {
         _allCount = results[0];
         _todayCount = results[1];
+        _characterisationCount = results[2];
       });
     } catch (_) {
       // Non-fatal: leave counts null so buttons show "— readings",
@@ -74,6 +90,7 @@ class _DataExportScreenState extends State<DataExportScreen> {
       setState(() {
         _allCount = null;
         _todayCount = null;
+        _characterisationCount = null;
       });
     }
   }
@@ -130,6 +147,32 @@ class _DataExportScreenState extends State<DataExportScreen> {
     }
   }
 
+  Future<void> _exportCharacterisation() async {
+    setState(() {
+      _busyCharacterisation = true;
+      _messageCharacterisation = null;
+    });
+    try {
+      final rows = await _repo.getReadingsForCharacterisation();
+      if (rows.isEmpty) {
+        if (!mounted) return;
+        setState(
+          () => _messageCharacterisation = _emptyCharacterisationMessage,
+        );
+        return;
+      }
+      final file = await CsvExportService.instance.exportCharacterisation(
+        rows: rows,
+      );
+      await _shareFile(file, 'Commuta — battery characterisation');
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _messageCharacterisation = 'Export failed: $e');
+    } finally {
+      if (mounted) setState(() => _busyCharacterisation = false);
+    }
+  }
+
   /// Local midnight (inclusive) → now (inclusive).
   ///
   /// `getReadingsBetween` uses `isBetweenValues`, which is inclusive
@@ -161,7 +204,7 @@ class _DataExportScreenState extends State<DataExportScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final bothBusy = _busyAll || _busyToday;
+    final anyBusy = _busyAll || _busyToday || _busyCharacterisation;
 
     return Scaffold(
       backgroundColor: AppColours.background,
@@ -189,7 +232,7 @@ class _DataExportScreenState extends State<DataExportScreen> {
               title: 'All data',
               subtitle: _formatCountSubtitle(_allCount),
               busy: _busyAll,
-              enabled: !bothBusy,
+              enabled: !anyBusy,
               onPressed: _exportAll,
             ),
             if (_messageAll != null)
@@ -202,11 +245,24 @@ class _DataExportScreenState extends State<DataExportScreen> {
               title: 'Today',
               subtitle: _formatCountSubtitle(_todayCount),
               busy: _busyToday,
-              enabled: !bothBusy,
+              enabled: !anyBusy,
               onPressed: _exportToday,
             ),
             if (_messageToday != null)
               _InlineMessage(text: _messageToday!),
+
+            const SizedBox(height: 12),
+
+            _ExportButton(
+              icon: Icons.battery_charging_full_outlined,
+              title: 'Battery characterisation (dev)',
+              subtitle: _formatCountSubtitle(_characterisationCount),
+              busy: _busyCharacterisation,
+              enabled: !anyBusy,
+              onPressed: _exportCharacterisation,
+            ),
+            if (_messageCharacterisation != null)
+              _InlineMessage(text: _messageCharacterisation!),
 
             const SizedBox(height: 20),
             const _FooterNote(),

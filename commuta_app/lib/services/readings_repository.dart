@@ -20,6 +20,15 @@ import '../data/models/air_quality_reading.dart';
 /// classification beats the raw write, whether the raw write came
 /// from the live or buffered stream, or the other way round.
 ///
+/// v3 note: `AirQualityReading` now also carries `bootEpoch`,
+/// `dps368TempC`, and `vbatMv` (see [AirQualityReading] for
+/// semantics). Session 1 Decision 1 kept the UPSERT `target` as the
+/// pre-existing `(sequenceNumber, timestamp)` pair — the additive
+/// v3 UNIQUE INDEX on `(bootEpoch, sequenceNumber)` exists at the
+/// DB layer but isn't referenced from Dart. If a future session
+/// switches gap detection to bootEpoch-scoped queries (currently
+/// Decision 3 leaves this alone), the UPSERT target may move too.
+///
 /// The Google Map view calls [setGpsForReading] (same UPSERT shape)
 /// to attach the phone's coordinates to unclassified live readings
 /// that pass the plotting accuracy gate. A reading is therefore
@@ -46,9 +55,11 @@ class ReadingsRepository {
   }
 
   /// Persist a reading as it arrives, with no classification.
-  /// If a row with the same `(sequenceNumber, timestamp)` already
-  /// exists — because classification beat us to it, or because a
-  /// buffered record duplicates one we already have — leave it alone.
+  /// If a row with the same `(sequenceNumber, timestamp)` — or, for
+  /// v3 rows, the same `(bootEpoch, sequenceNumber)` — already
+  /// exists, leave it alone. `DoNothing()` without an explicit
+  /// target catches conflicts on any unique constraint, so it
+  /// handles both keys transparently.
   Future<void> _persistRaw(AirQualityReading r) async {
     await _db.into(_db.readings).insert(
       _toCompanion(r),
@@ -255,6 +266,35 @@ class ReadingsRepository {
     return rows.map(_fromRow).toList();
   }
 
+  /// Returns every reading whose `vbatMv` column is populated,
+  /// ordered by (bootEpoch, sequenceNumber) ascending — matching the
+  /// natural sample order within each firmware boot session, with
+  /// runs from different `bootEpoch` values grouped contiguously.
+  ///
+  /// Used by the one-off battery-characterisation CSV export. The
+  /// intended workflow: fully charge the device, unplug, let it run
+  /// on battery until it dies (the firmware buffers every 10 s
+  /// sample to LittleFS regardless of BLE state — up to ~71 hours,
+  /// well beyond a single 2000 mAh discharge), recharge, reconnect,
+  /// wait for the buffered sync to drain, then trigger the
+  /// characterisation export from Profile → Data → Export. The
+  /// resulting CSV feeds the OCV lookup table that Session 3 uses
+  /// for app-side SOC.
+  ///
+  /// Pre-v3 rows and mock rows have null `vbatMv` and are naturally
+  /// excluded.
+  Future<List<AirQualityReading>> getReadingsForCharacterisation() async {
+    final rows =
+        await (_db.select(_db.readings)
+              ..where((t) => t.vbatMv.isNotNull())
+              ..orderBy([
+                (t) => OrderingTerm.asc(t.bootEpoch),
+                (t) => OrderingTerm.asc(t.sequenceNumber),
+              ]))
+            .get();
+    return rows.map(_fromRow).toList();
+  }
+
   Future<int> countAll() async {
     final countExp = _db.readings.id.count();
     final row = await (_db.selectOnly(
@@ -282,6 +322,21 @@ class ReadingsRepository {
     return row.read(countExp) ?? 0;
   }
 
+  /// Returns the number of readings whose `vbatMv` column is
+  /// populated. Preview count for the characterisation-export
+  /// button on the Export data screen, so the user can tell at a
+  /// glance whether a discharge run's rows have landed in the DB
+  /// after a sync.
+  Future<int> countCharacterisation() async {
+    final countExp = _db.readings.id.count();
+    final row =
+        await (_db.selectOnly(_db.readings)
+              ..addColumns([countExp])
+              ..where(_db.readings.vbatMv.isNotNull()))
+            .getSingle();
+    return row.read(countExp) ?? 0;
+  }
+
   /// Returns the sorted distinct `sequenceNumber`s of every reading
   /// whose `timestamp` is at or after [since]. Empty list when no
   /// rows match.
@@ -296,6 +351,12 @@ class ReadingsRepository {
   /// missing ranges — never re-requesting a held record, because the
   /// unique key `(sequenceNumber, timestamp)` cannot dedupe
   /// re-reconstructed timestamps that carry per-anchor jitter.
+  ///
+  /// v3 note: with `bootEpoch` now stored on every fresh row, a
+  /// future refactor could switch this to `WHERE bootEpoch =
+  /// currentBoot` for cleaner era-scoping. Session 1 Decision 3
+  /// deliberately kept the current timestamp-cutoff logic in place;
+  /// this method is unchanged as a consequence.
   ///
   /// Rows older than [since] — previous power sessions, or a previous
   /// numbering era after a flash wipe — are deliberately invisible to
@@ -344,6 +405,9 @@ class ReadingsRepository {
       tvoc:                   Value(r.tvoc),
       vocRaw:                 Value(r.vocRaw),
       noxRaw:                 Value(r.noxRaw),
+      bootEpoch:              Value(r.bootEpoch),
+      dps368TempC:            Value(r.dps368TempC),
+      vbatMv:                 Value(r.vbatMv),
       sourceFlag:             Value(r.sourceFlag),
       stationId:              Value(r.stationId),
       lineId:                 Value(r.lineId),
@@ -367,6 +431,9 @@ class ReadingsRepository {
       tvoc:                   row.tvoc,
       vocRaw:                 row.vocRaw,
       noxRaw:                 row.noxRaw,
+      bootEpoch:              row.bootEpoch,
+      dps368TempC:            row.dps368TempC,
+      vbatMv:                 row.vbatMv,
       sourceFlag:             row.sourceFlag,
       sequenceNumber:         row.sequenceNumber,
       stationId:              row.stationId,

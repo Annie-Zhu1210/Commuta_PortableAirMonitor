@@ -21,7 +21,8 @@ import 'air_quality_datasource.dart';
 /// device-connection interface was introduced — the class is now more
 /// than a data source.
 class MockManager implements AirQualityDataSource, DeviceConnection {
-  MockManager();
+  MockManager()
+    : _mockBootEpoch = DateTime.now().millisecondsSinceEpoch & 0xFFFFFFFF;
 
   // ═════════════════════════════════════════════════════════════════
   // Air-quality half. Behaviour is a straight lift of the previous
@@ -33,6 +34,17 @@ class MockManager implements AirQualityDataSource, DeviceConnection {
   StreamController<AirQualityReading>? _readingController;
   Timer? _sampleTimer;
   int _sequence = 0;
+
+  /// Synthetic `bootEpoch` for this MockManager instance. Generated
+  /// once at construction from the low 32 bits of the wall-clock
+  /// millisecond count, so it matches the uint32 shape of the real
+  /// firmware's per-boot ID while being distinct across restarts and
+  /// stable within a single app run. Mirrors the identity role of
+  /// `LivePacket.bootEpoch` — combined with [sequenceNumber] it forms
+  /// the (bootEpoch, sequenceNumber) unique key on the readings table
+  /// — so mock rows can coexist with real rows without conflicting
+  /// on that index.
+  final int _mockBootEpoch;
 
   // Simulated "current" values that drift slightly each tick.
   double _pm1  = 8.2;
@@ -87,6 +99,14 @@ class MockManager implements AirQualityDataSource, DeviceConnection {
       nox:                    null,
       vocRaw:                 null,
       noxRaw:                 null,
+      // v3 fields. `bootEpoch` gets the synthetic per-run ID so mock
+      // rows have a non-null value on the (bootEpoch, sequenceNumber)
+      // unique key; the DPS368 and battery-voltage channels don't
+      // exist in the mock and are left null (sensor "unavailable"),
+      // matching how [AirQualityReading] documents mock semantics.
+      bootEpoch:              _mockBootEpoch,
+      dps368TempC:            null,
+      vbatMv:                 null,
       sourceFlag:             'mock',
       sequenceNumber:         _sequence,
     );

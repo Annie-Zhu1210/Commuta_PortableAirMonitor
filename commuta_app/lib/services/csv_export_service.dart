@@ -9,14 +9,25 @@ import 'tfl_map_data.dart';
 /// writes it to a temporary file suitable for handoff to the iOS
 /// share sheet via `share_plus`.
 ///
-/// Output shape is fixed and documented at [_columnHeaders]. Every
-/// row includes the full schema (minus the internal autoincrement
-/// `id`) plus two resolved-name columns — `station_name` and
-/// `line_name` — populated by looking up `stationId` / `lineId`
-/// against [TflMapData]. Names are blank whenever the ID is null or
-/// doesn't resolve against the bundled TfL dataset.
+/// Two exports are provided:
+///   * [exportReadings] — the full 22-column dissertation dataset,
+///     one row per persisted reading.
+///   * [exportCharacterisation] — a compact 6-column dev-only export
+///     of every row carrying a battery-voltage sample, ordered by
+///     (bootEpoch, sequenceNumber). Feeds the empirical OCV lookup
+///     table that Phase 4b uses for app-side state-of-charge; see
+///     [ReadingsRepository.getReadingsForCharacterisation] for the
+///     intended discharge workflow.
 ///
-/// Dialect:
+/// Output shape of the primary export is fixed and documented at
+/// [_columnHeaders]. Every row includes the full schema (minus the
+/// internal autoincrement `id`) plus two resolved-name columns —
+/// `station_name` and `line_name` — populated by looking up
+/// `stationId` / `lineId` against [TflMapData]. Names are blank
+/// whenever the ID is null or doesn't resolve against the bundled
+/// TfL dataset.
+///
+/// Dialect (both exports):
 ///   * Comma delimiter, CRLF row terminator (RFC 4180).
 ///   * UTF-8 encoding with BOM (`\uFEFF`) so Excel on Windows renders
 ///     non-ASCII characters correctly.
@@ -40,8 +51,14 @@ class CsvExportService {
   static const String _lineEnding = '\r\n';
   static const String _bom = '\uFEFF';
 
-  /// Column headers, snake_case matching the Drift SQL column names
-  /// plus two resolved-name columns interleaved next to their IDs.
+  /// Column headers for the primary readings export. Mostly snake_case
+  /// matching the Drift SQL column names, plus two resolved-name
+  /// columns (`station_name`, `line_name`) interleaved next to their
+  /// IDs, and one deliberately non-conforming `DPS_tem` column for
+  /// the DPS368 ambient temperature — kept short and distinct from
+  /// the SCD40 `temperature` column that immediately precedes it, so
+  /// the pair are easy to compare side-by-side in the methodology
+  /// analysis.
   ///
   /// The internal autoincrement `id` is deliberately omitted — it has
   /// no analytical value and would bloat downstream joins.
@@ -53,6 +70,7 @@ class CsvExportService {
     'pm10',
     'co2',
     'temperature',
+    'DPS_tem',
     'humidity',
     'pressure',
     'pressure_change_pa_per_sec',
@@ -67,6 +85,22 @@ class CsvExportService {
     'line_name',
     'gps_lat',
     'gps_lng',
+  ];
+
+  /// Column headers for the battery-characterisation export. Compact
+  /// by design — the OCV-derivation pipeline downstream only needs
+  /// the per-boot identity, the sample's position within that boot,
+  /// the wall-clock timestamp for elapsed-time regressions, the raw
+  /// cell voltage, the DPS368 ambient temperature (for
+  /// temperature-compensated curves), and the source flag as a sanity
+  /// check that no `mock` rows have leaked into the discharge dataset.
+  static const List<String> _characterisationHeaders = [
+    'boot_epoch',
+    'sequence_number',
+    'timestamp',
+    'vbat_mv',
+    'dps368_temp_c',
+    'source_flag',
   ];
 
   /// Build a CSV of [rows] and write it to a temporary file whose
@@ -107,6 +141,7 @@ class CsvExportService {
         _formatDouble(r.pm10),
         _formatDouble(r.co2),
         _formatDouble(r.temperature),
+        _formatNullableDouble(r.dps368TempC),
         _formatDouble(r.humidity),
         _formatDouble(r.pressure),
         _formatNullableDouble(r.pressureChangePaPerSec),
@@ -130,6 +165,53 @@ class CsvExportService {
     final now = DateTime.now();
     final stamp = _formatFilenameTimestamp(now);
     final filename = 'commuta_readings_${rangeLabel}_$stamp.csv';
+
+    final tmpDir = await getTemporaryDirectory();
+    final file = File('${tmpDir.path}/$filename');
+    await file.writeAsString(buffer.toString(), flush: true);
+    return file;
+  }
+
+  /// Build a battery-characterisation CSV of [rows] and write it to a
+  /// temporary file. Returns the [File] for the caller to hand off to
+  /// the iOS share sheet.
+  ///
+  /// [rows] must already be filtered to only those readings carrying
+  /// a `vbatMv` sample — the caller obtains this via
+  /// [ReadingsRepository.getReadingsForCharacterisation], which also
+  /// applies the `(bootEpoch, sequenceNumber)` ordering the OCV
+  /// pipeline expects. No station / GPS / TfL resolution is needed
+  /// for this export, so it's independent of [TflMapData].
+  ///
+  /// Same RFC 4180 / UTF-8 BOM / ISO 8601 dialect as [exportReadings];
+  /// null cells serialise as an empty string. Any `mock` rows that
+  /// somehow made it through the caller's filter will still write —
+  /// their `source_flag` column is the sanity check downstream.
+  Future<File> exportCharacterisation({
+    required List<AirQualityReading> rows,
+  }) async {
+    final buffer = StringBuffer()
+      ..write(_bom)
+      ..write(_characterisationHeaders.join(_delimiter))
+      ..write(_lineEnding);
+
+    for (final r in rows) {
+      final cells = <String>[
+        _formatNullableInt(r.bootEpoch),
+        _formatInt(r.sequenceNumber),
+        _formatTimestamp(r.timestamp),
+        _formatNullableInt(r.vbatMv),
+        _formatNullableDouble(r.dps368TempC),
+        _escape(r.sourceFlag),
+      ];
+      buffer
+        ..write(cells.join(_delimiter))
+        ..write(_lineEnding);
+    }
+
+    final now = DateTime.now();
+    final stamp = _formatFilenameTimestamp(now);
+    final filename = 'commuta_battery_characterisation_$stamp.csv';
 
     final tmpDir = await getTemporaryDirectory();
     final file = File('${tmpDir.path}/$filename');

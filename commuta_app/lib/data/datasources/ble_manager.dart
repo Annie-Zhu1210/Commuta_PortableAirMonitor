@@ -103,6 +103,15 @@ class BufferedSyncProgress {
 /// emitted on the buffered-only stream so UI surfaces showing "current
 /// reading" are not disturbed.
 ///
+/// v3 note: the wire format grew to 50 bytes with new `boot_epoch`,
+/// `dps368_temp_c`, and `vbat_mv` fields. Every sample is passed
+/// through to `AirQualityReading` and persisted to Drift. The gap-
+/// detection algorithm below is deliberately unchanged (Session 1
+/// Decision 3): era-scoping still uses the timestamp-cutoff query
+/// rather than `bootEpoch = currentBoot`, so `_sessionSeqs`,
+/// `eraSequenceNumbersProvider`, and `_resetToleranceSamples` all
+/// keep their current semantics.
+///
 /// Power-session scoping (revised Decision 2): buffered timestamps are
 /// reconstructed by counting 10-second ticks back from the live
 /// anchor, which is only valid while the device has been continuously
@@ -121,7 +130,7 @@ class BufferedSyncProgress {
 /// would corrupt station classification, which is worse than an
 /// honest gap.
 ///
-/// Duplicate safety: the DB's unique key is `(sequenceNumber,
+/// Duplicate safety: the DB's pre-v3 unique key is `(sequenceNumber,
 /// timestamp)` and reconstructed timestamps carry per-anchor jitter,
 /// so re-requesting a record we already hold would insert a near-
 /// duplicate row rather than conflict. The manager therefore only ever
@@ -130,6 +139,11 @@ class BufferedSyncProgress {
 /// this session (live *and* buffered), which closes the write-vs-query
 /// races on the freshly arrived live packet and on rows still in
 /// flight to the repository when a range's EOS triggers the next scan.
+/// v3 adds a second unique index on `(bootEpoch, sequenceNumber)` at
+/// the DB layer, which catches the last-remaining edge case (a
+/// duplicate buffered replay projected under a slightly different
+/// anchor) — but that is defence in depth; the in-memory set still
+/// carries the primary correctness burden.
 ///
 /// Auto-resume: if the buffered stream goes silent for
 /// [_syncHeartbeatTimeout] before EOS arrives (usually because the
@@ -279,10 +293,10 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
   /// so a record whose repository write hasn't committed yet can
   /// never be mistaken for a gap and re-requested (which would insert
   /// a near-duplicate row, since reconstructed timestamps carry
-  /// per-anchor jitter and the unique key is `(seq, timestamp)`).
-  /// Bounded by the flash capacity (≤ 25 600 buffered records) plus
-  /// one live entry per 10 s, so memory is trivial. Cleared in
-  /// `_teardownConnection`.
+  /// per-anchor jitter and the pre-v3 unique key is `(seq,
+  /// timestamp)`). Bounded by the flash capacity (≤ 25 600 buffered
+  /// records) plus one live entry per 10 s, so memory is trivial.
+  /// Cleared in `_teardownConnection`.
   final Set<int> _sessionSeqs = <int>{};
 
   /// Gap ranges requested so far this session, compared against
@@ -793,6 +807,12 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
     // Conditioning nulls only the processed indices (Option B): the
     // raw SGP41 ticks are diagnostically useful even during warm-up
     // and are preserved for the dissertation's JSON export.
+    //
+    // v3 fields (bootEpoch, dps368TempC, vbatMv) are passed through
+    // directly. `temperature` remains SCD40 — the ambient card and
+    // every existing consumer of `AirQualityReading.temperature`
+    // continue to read the SCD40 value (Annie's decision); the
+    // DPS368 reading is captured for export as methodology data.
     final reading = AirQualityReading(
       timestamp: now,
       pm1: packet.pm1,
@@ -807,6 +827,9 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
       nox: packet.conditioning ? null : packet.noxIndex.toDouble(),
       vocRaw: packet.srawVoc,
       noxRaw: packet.srawNox,
+      bootEpoch: packet.bootEpoch,
+      dps368TempC: packet.dps368TempC,
+      vbatMv: packet.vbatMv,
       sourceFlag: 'live',
       sequenceNumber: packet.sequence,
     );
@@ -819,11 +842,27 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
       _liveReadingsController.add(reading);
     }
 
+    // Expanded log for the post-flash v3 sanity check: temperature
+    // (SCD40 + DPS368), humidity, pressure, and vbat_mv should all
+    // fall inside plausible ranges on the first sample. Ranges
+    // documented in the handoff doc:
+    //   temp    → room range, ~20–30 °C
+    //   rh      → 30–70 %
+    //   p       → ~1000 hPa
+    //   vbat_mv → 3300–4200
+    // If any field looks wildly off (e.g. temp = 1.4e-38, p = 0,
+    // vbat = 65535), an offset in the parser is still wrong.
     debugPrint(
       '[BLEManager] Live #${packet.sequence} '
+      'v${packet.structVersion} '
       'pm2.5=${packet.pm25.toStringAsFixed(1)} '
       'co2=${packet.co2} '
-      'batt=${packet.batteryPercent}%'
+      't/scd=${packet.temperature.toStringAsFixed(1)} '
+      't/dps=${packet.dps368TempC.toStringAsFixed(1)} '
+      'rh=${packet.humidity.toStringAsFixed(0)}% '
+      'p=${packet.pressure.toStringAsFixed(0)}hPa '
+      'vbat=${packet.vbatMv}mV '
+      'boot=0x${packet.bootEpoch.toRadixString(16).padLeft(8, '0')}'
       '${packet.conditioning ? ' cond' : ''}',
     );
 
@@ -1356,6 +1395,9 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
         nox: packet.conditioning ? null : packet.noxIndex.toDouble(),
         vocRaw: packet.srawVoc,
         noxRaw: packet.srawNox,
+        bootEpoch: packet.bootEpoch,
+        dps368TempC: packet.dps368TempC,
+        vbatMv: packet.vbatMv,
         sourceFlag: 'buffered',
         sequenceNumber: packet.sequence,
       );

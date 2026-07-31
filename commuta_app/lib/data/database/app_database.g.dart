@@ -159,6 +159,37 @@ class $ReadingsTable extends Readings with TableInfo<$ReadingsTable, Reading> {
     type: DriftSqlType.int,
     requiredDuringInsert: false,
   );
+  static const VerificationMeta _bootEpochMeta = const VerificationMeta(
+    'bootEpoch',
+  );
+  @override
+  late final GeneratedColumn<int> bootEpoch = GeneratedColumn<int>(
+    'boot_epoch',
+    aliasedName,
+    true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _dps368TempCMeta = const VerificationMeta(
+    'dps368TempC',
+  );
+  @override
+  late final GeneratedColumn<double> dps368TempC = GeneratedColumn<double>(
+    'dps368_temp_c',
+    aliasedName,
+    true,
+    type: DriftSqlType.double,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _vbatMvMeta = const VerificationMeta('vbatMv');
+  @override
+  late final GeneratedColumn<int> vbatMv = GeneratedColumn<int>(
+    'vbat_mv',
+    aliasedName,
+    true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+  );
   static const VerificationMeta _sourceFlagMeta = const VerificationMeta(
     'sourceFlag',
   );
@@ -225,6 +256,9 @@ class $ReadingsTable extends Readings with TableInfo<$ReadingsTable, Reading> {
     tvoc,
     vocRaw,
     noxRaw,
+    bootEpoch,
+    dps368TempC,
+    vbatMv,
     sourceFlag,
     stationId,
     lineId,
@@ -357,6 +391,27 @@ class $ReadingsTable extends Readings with TableInfo<$ReadingsTable, Reading> {
         noxRaw.isAcceptableOrUnknown(data['nox_raw']!, _noxRawMeta),
       );
     }
+    if (data.containsKey('boot_epoch')) {
+      context.handle(
+        _bootEpochMeta,
+        bootEpoch.isAcceptableOrUnknown(data['boot_epoch']!, _bootEpochMeta),
+      );
+    }
+    if (data.containsKey('dps368_temp_c')) {
+      context.handle(
+        _dps368TempCMeta,
+        dps368TempC.isAcceptableOrUnknown(
+          data['dps368_temp_c']!,
+          _dps368TempCMeta,
+        ),
+      );
+    }
+    if (data.containsKey('vbat_mv')) {
+      context.handle(
+        _vbatMvMeta,
+        vbatMv.isAcceptableOrUnknown(data['vbat_mv']!, _vbatMvMeta),
+      );
+    }
     if (data.containsKey('source_flag')) {
       context.handle(
         _sourceFlagMeta,
@@ -462,6 +517,18 @@ class $ReadingsTable extends Readings with TableInfo<$ReadingsTable, Reading> {
         DriftSqlType.int,
         data['${effectivePrefix}nox_raw'],
       ),
+      bootEpoch: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}boot_epoch'],
+      ),
+      dps368TempC: attachedDatabase.typeMapping.read(
+        DriftSqlType.double,
+        data['${effectivePrefix}dps368_temp_c'],
+      ),
+      vbatMv: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}vbat_mv'],
+      ),
       sourceFlag: attachedDatabase.typeMapping.read(
         DriftSqlType.string,
         data['${effectivePrefix}source_flag'],
@@ -513,6 +580,22 @@ class Reading extends DataClass implements Insertable<Reading> {
   /// SGP41 raw NOx ticks (uint16 on the wire). Always populated,
   /// even during CONDITIONING. Database-only; surfaced in JSON export.
   final int? noxRaw;
+
+  /// v3: per-install random ID stamped by firmware, part of the new
+  /// unique index `ux_readings_boot_seq` on `(bootEpoch,
+  /// sequenceNumber)`. Nullable — legacy pre-v3 rows carry null.
+  final int? bootEpoch;
+
+  /// v3: DPS368 ambient temperature (no self-heating). Not surfaced
+  /// in the UI; exported as the `DPS_tem` column in the production
+  /// CSV. Nullable — pre-v3 rows and mock rows leave it null.
+  final double? dps368TempC;
+
+  /// v3: raw battery voltage in mV (uint16 on the wire). Read by
+  /// the one-off battery characterisation export; will drive the
+  /// app-side SOC calculation in Session 3. Nullable — pre-v3 rows
+  /// and mock rows leave it null.
+  final int? vbatMv;
   final String sourceFlag;
   final String? stationId;
   final String? lineId;
@@ -534,6 +617,9 @@ class Reading extends DataClass implements Insertable<Reading> {
     this.tvoc,
     this.vocRaw,
     this.noxRaw,
+    this.bootEpoch,
+    this.dps368TempC,
+    this.vbatMv,
     required this.sourceFlag,
     this.stationId,
     this.lineId,
@@ -569,6 +655,15 @@ class Reading extends DataClass implements Insertable<Reading> {
     }
     if (!nullToAbsent || noxRaw != null) {
       map['nox_raw'] = Variable<int>(noxRaw);
+    }
+    if (!nullToAbsent || bootEpoch != null) {
+      map['boot_epoch'] = Variable<int>(bootEpoch);
+    }
+    if (!nullToAbsent || dps368TempC != null) {
+      map['dps368_temp_c'] = Variable<double>(dps368TempC);
+    }
+    if (!nullToAbsent || vbatMv != null) {
+      map['vbat_mv'] = Variable<int>(vbatMv);
     }
     map['source_flag'] = Variable<String>(sourceFlag);
     if (!nullToAbsent || stationId != null) {
@@ -609,6 +704,15 @@ class Reading extends DataClass implements Insertable<Reading> {
       noxRaw: noxRaw == null && nullToAbsent
           ? const Value.absent()
           : Value(noxRaw),
+      bootEpoch: bootEpoch == null && nullToAbsent
+          ? const Value.absent()
+          : Value(bootEpoch),
+      dps368TempC: dps368TempC == null && nullToAbsent
+          ? const Value.absent()
+          : Value(dps368TempC),
+      vbatMv: vbatMv == null && nullToAbsent
+          ? const Value.absent()
+          : Value(vbatMv),
       sourceFlag: Value(sourceFlag),
       stationId: stationId == null && nullToAbsent
           ? const Value.absent()
@@ -648,6 +752,9 @@ class Reading extends DataClass implements Insertable<Reading> {
       tvoc: serializer.fromJson<double?>(json['tvoc']),
       vocRaw: serializer.fromJson<int?>(json['vocRaw']),
       noxRaw: serializer.fromJson<int?>(json['noxRaw']),
+      bootEpoch: serializer.fromJson<int?>(json['bootEpoch']),
+      dps368TempC: serializer.fromJson<double?>(json['dps368TempC']),
+      vbatMv: serializer.fromJson<int?>(json['vbatMv']),
       sourceFlag: serializer.fromJson<String>(json['sourceFlag']),
       stationId: serializer.fromJson<String?>(json['stationId']),
       lineId: serializer.fromJson<String?>(json['lineId']),
@@ -676,6 +783,9 @@ class Reading extends DataClass implements Insertable<Reading> {
       'tvoc': serializer.toJson<double?>(tvoc),
       'vocRaw': serializer.toJson<int?>(vocRaw),
       'noxRaw': serializer.toJson<int?>(noxRaw),
+      'bootEpoch': serializer.toJson<int?>(bootEpoch),
+      'dps368TempC': serializer.toJson<double?>(dps368TempC),
+      'vbatMv': serializer.toJson<int?>(vbatMv),
       'sourceFlag': serializer.toJson<String>(sourceFlag),
       'stationId': serializer.toJson<String?>(stationId),
       'lineId': serializer.toJson<String?>(lineId),
@@ -700,6 +810,9 @@ class Reading extends DataClass implements Insertable<Reading> {
     Value<double?> tvoc = const Value.absent(),
     Value<int?> vocRaw = const Value.absent(),
     Value<int?> noxRaw = const Value.absent(),
+    Value<int?> bootEpoch = const Value.absent(),
+    Value<double?> dps368TempC = const Value.absent(),
+    Value<int?> vbatMv = const Value.absent(),
     String? sourceFlag,
     Value<String?> stationId = const Value.absent(),
     Value<String?> lineId = const Value.absent(),
@@ -723,6 +836,9 @@ class Reading extends DataClass implements Insertable<Reading> {
     tvoc: tvoc.present ? tvoc.value : this.tvoc,
     vocRaw: vocRaw.present ? vocRaw.value : this.vocRaw,
     noxRaw: noxRaw.present ? noxRaw.value : this.noxRaw,
+    bootEpoch: bootEpoch.present ? bootEpoch.value : this.bootEpoch,
+    dps368TempC: dps368TempC.present ? dps368TempC.value : this.dps368TempC,
+    vbatMv: vbatMv.present ? vbatMv.value : this.vbatMv,
     sourceFlag: sourceFlag ?? this.sourceFlag,
     stationId: stationId.present ? stationId.value : this.stationId,
     lineId: lineId.present ? lineId.value : this.lineId,
@@ -752,6 +868,11 @@ class Reading extends DataClass implements Insertable<Reading> {
       tvoc: data.tvoc.present ? data.tvoc.value : this.tvoc,
       vocRaw: data.vocRaw.present ? data.vocRaw.value : this.vocRaw,
       noxRaw: data.noxRaw.present ? data.noxRaw.value : this.noxRaw,
+      bootEpoch: data.bootEpoch.present ? data.bootEpoch.value : this.bootEpoch,
+      dps368TempC: data.dps368TempC.present
+          ? data.dps368TempC.value
+          : this.dps368TempC,
+      vbatMv: data.vbatMv.present ? data.vbatMv.value : this.vbatMv,
       sourceFlag: data.sourceFlag.present
           ? data.sourceFlag.value
           : this.sourceFlag,
@@ -780,6 +901,9 @@ class Reading extends DataClass implements Insertable<Reading> {
           ..write('tvoc: $tvoc, ')
           ..write('vocRaw: $vocRaw, ')
           ..write('noxRaw: $noxRaw, ')
+          ..write('bootEpoch: $bootEpoch, ')
+          ..write('dps368TempC: $dps368TempC, ')
+          ..write('vbatMv: $vbatMv, ')
           ..write('sourceFlag: $sourceFlag, ')
           ..write('stationId: $stationId, ')
           ..write('lineId: $lineId, ')
@@ -790,7 +914,7 @@ class Reading extends DataClass implements Insertable<Reading> {
   }
 
   @override
-  int get hashCode => Object.hash(
+  int get hashCode => Object.hashAll([
     id,
     sequenceNumber,
     timestamp,
@@ -806,12 +930,15 @@ class Reading extends DataClass implements Insertable<Reading> {
     tvoc,
     vocRaw,
     noxRaw,
+    bootEpoch,
+    dps368TempC,
+    vbatMv,
     sourceFlag,
     stationId,
     lineId,
     gpsLat,
     gpsLng,
-  );
+  ]);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -831,6 +958,9 @@ class Reading extends DataClass implements Insertable<Reading> {
           other.tvoc == this.tvoc &&
           other.vocRaw == this.vocRaw &&
           other.noxRaw == this.noxRaw &&
+          other.bootEpoch == this.bootEpoch &&
+          other.dps368TempC == this.dps368TempC &&
+          other.vbatMv == this.vbatMv &&
           other.sourceFlag == this.sourceFlag &&
           other.stationId == this.stationId &&
           other.lineId == this.lineId &&
@@ -854,6 +984,9 @@ class ReadingsCompanion extends UpdateCompanion<Reading> {
   final Value<double?> tvoc;
   final Value<int?> vocRaw;
   final Value<int?> noxRaw;
+  final Value<int?> bootEpoch;
+  final Value<double?> dps368TempC;
+  final Value<int?> vbatMv;
   final Value<String> sourceFlag;
   final Value<String?> stationId;
   final Value<String?> lineId;
@@ -875,6 +1008,9 @@ class ReadingsCompanion extends UpdateCompanion<Reading> {
     this.tvoc = const Value.absent(),
     this.vocRaw = const Value.absent(),
     this.noxRaw = const Value.absent(),
+    this.bootEpoch = const Value.absent(),
+    this.dps368TempC = const Value.absent(),
+    this.vbatMv = const Value.absent(),
     this.sourceFlag = const Value.absent(),
     this.stationId = const Value.absent(),
     this.lineId = const Value.absent(),
@@ -897,6 +1033,9 @@ class ReadingsCompanion extends UpdateCompanion<Reading> {
     this.tvoc = const Value.absent(),
     this.vocRaw = const Value.absent(),
     this.noxRaw = const Value.absent(),
+    this.bootEpoch = const Value.absent(),
+    this.dps368TempC = const Value.absent(),
+    this.vbatMv = const Value.absent(),
     required String sourceFlag,
     this.stationId = const Value.absent(),
     this.lineId = const Value.absent(),
@@ -928,6 +1067,9 @@ class ReadingsCompanion extends UpdateCompanion<Reading> {
     Expression<double>? tvoc,
     Expression<int>? vocRaw,
     Expression<int>? noxRaw,
+    Expression<int>? bootEpoch,
+    Expression<double>? dps368TempC,
+    Expression<int>? vbatMv,
     Expression<String>? sourceFlag,
     Expression<String>? stationId,
     Expression<String>? lineId,
@@ -951,6 +1093,9 @@ class ReadingsCompanion extends UpdateCompanion<Reading> {
       if (tvoc != null) 'tvoc': tvoc,
       if (vocRaw != null) 'voc_raw': vocRaw,
       if (noxRaw != null) 'nox_raw': noxRaw,
+      if (bootEpoch != null) 'boot_epoch': bootEpoch,
+      if (dps368TempC != null) 'dps368_temp_c': dps368TempC,
+      if (vbatMv != null) 'vbat_mv': vbatMv,
       if (sourceFlag != null) 'source_flag': sourceFlag,
       if (stationId != null) 'station_id': stationId,
       if (lineId != null) 'line_id': lineId,
@@ -975,6 +1120,9 @@ class ReadingsCompanion extends UpdateCompanion<Reading> {
     Value<double?>? tvoc,
     Value<int?>? vocRaw,
     Value<int?>? noxRaw,
+    Value<int?>? bootEpoch,
+    Value<double?>? dps368TempC,
+    Value<int?>? vbatMv,
     Value<String>? sourceFlag,
     Value<String?>? stationId,
     Value<String?>? lineId,
@@ -998,6 +1146,9 @@ class ReadingsCompanion extends UpdateCompanion<Reading> {
       tvoc: tvoc ?? this.tvoc,
       vocRaw: vocRaw ?? this.vocRaw,
       noxRaw: noxRaw ?? this.noxRaw,
+      bootEpoch: bootEpoch ?? this.bootEpoch,
+      dps368TempC: dps368TempC ?? this.dps368TempC,
+      vbatMv: vbatMv ?? this.vbatMv,
       sourceFlag: sourceFlag ?? this.sourceFlag,
       stationId: stationId ?? this.stationId,
       lineId: lineId ?? this.lineId,
@@ -1056,6 +1207,15 @@ class ReadingsCompanion extends UpdateCompanion<Reading> {
     if (noxRaw.present) {
       map['nox_raw'] = Variable<int>(noxRaw.value);
     }
+    if (bootEpoch.present) {
+      map['boot_epoch'] = Variable<int>(bootEpoch.value);
+    }
+    if (dps368TempC.present) {
+      map['dps368_temp_c'] = Variable<double>(dps368TempC.value);
+    }
+    if (vbatMv.present) {
+      map['vbat_mv'] = Variable<int>(vbatMv.value);
+    }
     if (sourceFlag.present) {
       map['source_flag'] = Variable<String>(sourceFlag.value);
     }
@@ -1092,6 +1252,9 @@ class ReadingsCompanion extends UpdateCompanion<Reading> {
           ..write('tvoc: $tvoc, ')
           ..write('vocRaw: $vocRaw, ')
           ..write('noxRaw: $noxRaw, ')
+          ..write('bootEpoch: $bootEpoch, ')
+          ..write('dps368TempC: $dps368TempC, ')
+          ..write('vbatMv: $vbatMv, ')
           ..write('sourceFlag: $sourceFlag, ')
           ..write('stationId: $stationId, ')
           ..write('lineId: $lineId, ')
@@ -1130,6 +1293,9 @@ typedef $$ReadingsTableCreateCompanionBuilder =
       Value<double?> tvoc,
       Value<int?> vocRaw,
       Value<int?> noxRaw,
+      Value<int?> bootEpoch,
+      Value<double?> dps368TempC,
+      Value<int?> vbatMv,
       required String sourceFlag,
       Value<String?> stationId,
       Value<String?> lineId,
@@ -1153,6 +1319,9 @@ typedef $$ReadingsTableUpdateCompanionBuilder =
       Value<double?> tvoc,
       Value<int?> vocRaw,
       Value<int?> noxRaw,
+      Value<int?> bootEpoch,
+      Value<double?> dps368TempC,
+      Value<int?> vbatMv,
       Value<String> sourceFlag,
       Value<String?> stationId,
       Value<String?> lineId,
@@ -1241,6 +1410,21 @@ class $$ReadingsTableFilterComposer
 
   ColumnFilters<int> get noxRaw => $composableBuilder(
     column: $table.noxRaw,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get bootEpoch => $composableBuilder(
+    column: $table.bootEpoch,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<double> get dps368TempC => $composableBuilder(
+    column: $table.dps368TempC,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get vbatMv => $composableBuilder(
+    column: $table.vbatMv,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -1354,6 +1538,21 @@ class $$ReadingsTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<int> get bootEpoch => $composableBuilder(
+    column: $table.bootEpoch,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<double> get dps368TempC => $composableBuilder(
+    column: $table.dps368TempC,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get vbatMv => $composableBuilder(
+    column: $table.vbatMv,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<String> get sourceFlag => $composableBuilder(
     column: $table.sourceFlag,
     builder: (column) => ColumnOrderings(column),
@@ -1440,6 +1639,17 @@ class $$ReadingsTableAnnotationComposer
   GeneratedColumn<int> get noxRaw =>
       $composableBuilder(column: $table.noxRaw, builder: (column) => column);
 
+  GeneratedColumn<int> get bootEpoch =>
+      $composableBuilder(column: $table.bootEpoch, builder: (column) => column);
+
+  GeneratedColumn<double> get dps368TempC => $composableBuilder(
+    column: $table.dps368TempC,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get vbatMv =>
+      $composableBuilder(column: $table.vbatMv, builder: (column) => column);
+
   GeneratedColumn<String> get sourceFlag => $composableBuilder(
     column: $table.sourceFlag,
     builder: (column) => column,
@@ -1501,6 +1711,9 @@ class $$ReadingsTableTableManager
                 Value<double?> tvoc = const Value.absent(),
                 Value<int?> vocRaw = const Value.absent(),
                 Value<int?> noxRaw = const Value.absent(),
+                Value<int?> bootEpoch = const Value.absent(),
+                Value<double?> dps368TempC = const Value.absent(),
+                Value<int?> vbatMv = const Value.absent(),
                 Value<String> sourceFlag = const Value.absent(),
                 Value<String?> stationId = const Value.absent(),
                 Value<String?> lineId = const Value.absent(),
@@ -1522,6 +1735,9 @@ class $$ReadingsTableTableManager
                 tvoc: tvoc,
                 vocRaw: vocRaw,
                 noxRaw: noxRaw,
+                bootEpoch: bootEpoch,
+                dps368TempC: dps368TempC,
+                vbatMv: vbatMv,
                 sourceFlag: sourceFlag,
                 stationId: stationId,
                 lineId: lineId,
@@ -1545,6 +1761,9 @@ class $$ReadingsTableTableManager
                 Value<double?> tvoc = const Value.absent(),
                 Value<int?> vocRaw = const Value.absent(),
                 Value<int?> noxRaw = const Value.absent(),
+                Value<int?> bootEpoch = const Value.absent(),
+                Value<double?> dps368TempC = const Value.absent(),
+                Value<int?> vbatMv = const Value.absent(),
                 required String sourceFlag,
                 Value<String?> stationId = const Value.absent(),
                 Value<String?> lineId = const Value.absent(),
@@ -1566,6 +1785,9 @@ class $$ReadingsTableTableManager
                 tvoc: tvoc,
                 vocRaw: vocRaw,
                 noxRaw: noxRaw,
+                bootEpoch: bootEpoch,
+                dps368TempC: dps368TempC,
+                vbatMv: vbatMv,
                 sourceFlag: sourceFlag,
                 stationId: stationId,
                 lineId: lineId,

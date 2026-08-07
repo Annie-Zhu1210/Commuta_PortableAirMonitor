@@ -274,8 +274,7 @@ class _PairedSection extends StatelessWidget {
         StreamBuilder<DeviceStatus>(
           stream: connection.statusStream,
           builder: (context, snap) {
-            final pct = snap.data?.batteryPercent ??
-                connection.batteryPercent;
+            final pct = connection.batteryPercent;
             return _StatusRow(
               icon: Icons.battery_std,
               iconColour: AppColours.accent,

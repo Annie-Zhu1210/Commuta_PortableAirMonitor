@@ -171,8 +171,7 @@ class _StatusBarBinder extends StatelessWidget
                   connectionState:
                       stateSnap.data ?? DeviceConnectionState.idle,
                   isPaired: isPaired,
-                  batteryPercent: statusSnap.data?.batteryPercent ??
-                      connection.batteryPercent,
+                  batteryPercent: connection.batteryPercent,
                   onTap: onTap,
                 );
               },

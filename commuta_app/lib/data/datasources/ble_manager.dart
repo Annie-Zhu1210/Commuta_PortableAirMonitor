@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/constants/ble_uuids.dart';
 import '../../services/device_connection.dart';
+import '../../core/utils/battery_soc.dart';
 import '../models/air_quality_reading.dart';
 import 'air_quality_datasource.dart';
 import 'ble_packet_parser.dart';
@@ -216,6 +217,14 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
   /// advice to clear the DB via the dev action.
   static const int _resetToleranceSamples = 6;
 
+  /// Rolling-median window size for the app-side battery percentage
+  /// (Phase 4b). Six Live samples ≈ 60 s at the 10 s cadence — long
+  /// enough to reject a BLE-TX voltage-sag spike, short enough that
+  /// the displayed percentage still reflects "now". Owned entries
+  /// live in [_recentVbatMvWindow]; the smoothing itself is done by
+  /// `smoothedPercentFromWindow` in `utils/battery_soc.dart`.
+  static const int _batteryVbatWindowSize = 6;
+
   bool _started = false;
   DeviceConnectionState _currentState = DeviceConnectionState.idle;
   final _stateController = StreamController<DeviceConnectionState>.broadcast();
@@ -230,6 +239,15 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
   int? _bufferedCount;
   AirQualityReading? _latestReading;
   DeviceStatus? _latestStatus;
+
+  /// Rolling window of the last few Live-sample `vbat_mv` readings,
+  /// consumed by `smoothedPercentFromWindow` (see
+  /// `utils/battery_soc.dart`) to compute a stable app-side battery
+  /// percentage (Phase 4b). Bounded to [_batteryVbatWindowSize]
+  /// entries — oldest are dropped as newer arrive. Cleared in
+  /// [_teardownConnection] so a reconnect starts fresh rather than
+  /// carrying stale voltages across a session boundary.
+  final List<int> _recentVbatMvWindow = <int>[];
 
   /// Previous Live-packet pressure in hPa, used to compute
   /// `pressureChangePaPerSec` on the following sample. Nulled on
@@ -838,6 +856,18 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
     _liveArrivalAnchor = (seq: packet.sequence, arrival: now);
     _sessionSeqs.add(packet.sequence);
 
+    // Phase 4b: app-side battery state-of-charge from the LOWESS-
+    // calibrated lookup in `utils/battery_soc.dart`. Push the fresh
+    // `vbat_mv` into the rolling window (dropping the oldest once
+    // the window is full), then update `_batteryPercent` from the
+    // median-and-snap smoother. Overrides any earlier firmware-
+    // computed value inherited from a Status packet (Decision 1b).
+    _recentVbatMvWindow.add(packet.vbatMv);
+    if (_recentVbatMvWindow.length > _batteryVbatWindowSize) {
+      _recentVbatMvWindow.removeAt(0);
+    }
+    _batteryPercent = smoothedPercentFromWindow(_recentVbatMvWindow);
+
     if (!_liveReadingsController.isClosed) {
       _liveReadingsController.add(reading);
     }
@@ -852,6 +882,9 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
     //   vbat_mv → 3300–4200
     // If any field looks wildly off (e.g. temp = 1.4e-38, p = 0,
     // vbat = 65535), an offset in the parser is still wrong.
+    // The `soc` field logs the app-side smoothed percentage
+    // (Phase 4b) so a discrepancy between vbat_mv and the displayed
+    // percentage is visible in one line.
     debugPrint(
       '[BLEManager] Live #${packet.sequence} '
       'v${packet.structVersion} '
@@ -862,6 +895,7 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
       'rh=${packet.humidity.toStringAsFixed(0)}% '
       'p=${packet.pressure.toStringAsFixed(0)}hPa '
       'vbat=${packet.vbatMv}mV '
+      'soc=${_batteryPercent?.toString() ?? '?'}% '
       'boot=0x${packet.bootEpoch.toRadixString(16).padLeft(8, '0')}'
       '${packet.conditioning ? ' cond' : ''}',
     );
@@ -891,7 +925,16 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
 
     _lastSeenNotifier.value = now;
     _latestStatus = status;
-    _batteryPercent = status.batteryPercent;
+    // Phase 4b (Decision 1b): prefer the LOWESS-calibrated app-side
+    // percentage computed from Live-sample `vbat_mv` over the
+    // firmware's byte at Status offset 20. The firmware value is
+    // only used as a startup fallback while no Live sample has
+    // arrived yet this session; once `_firstLiveReceived` latches,
+    // the Live handler owns `_batteryPercent` for the rest of the
+    // connection.
+    if (!_firstLiveReceived) {
+      _batteryPercent = status.batteryPercent;
+    }
     _bufferedCount = status.bufferedCount;
 
     // SHUTTING_DOWN is a one-way latch: once observed, we keep the
@@ -1640,6 +1683,7 @@ class BLEManager implements AirQualityDataSource, DeviceConnection {
     _sentCountTotal = 0;
     _sessionFirstSentSeq = null;
     _sessionLastSentSeq = null;
+    _recentVbatMvWindow.clear();
 
     final device = _connectedDevice;
     _connectedDevice = null;

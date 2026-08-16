@@ -1,0 +1,13 @@
+source_file,segment_id,start_seq,end_seq,line_name,group,direction
+commuta_readings_today_20260710_114808.csv,S01,4829,5189,Central,quieter,Stratford->Bond Street
+commuta_readings_today_20260807_233732.csv,S02,4894,5246,Jubilee,quieter,Stratford->Bond Street
+commuta_readings_today_20260807_233732.csv,S03,5312,5587,Elizabeth,busier,Paddington->Custom House
+commuta_readings_today_20260807_233732.csv,S04,5622,6011,Jubilee,busier,Bond Street->Stratford
+commuta_readings_today_20260810_184020.csv,S05,6021,6269,Northern,quieter,Euston->Kennington
+commuta_readings_today_20260810_184020.csv,S06,6282,6455,Victoria,quieter,Stockwell->Euston
+commuta_readings_today_20260810_184020.csv,S07,6460,6672,Northern,busier,Euston->Kennington
+commuta_readings_today_20260810_184020.csv,S08,6728,6880,Victoria,busier,Stockwell->Euston
+commuta_readings_today_20260810_184020.csv,S09,6883,7143,Hammersmith & City,busier,Paddington->Liverpool Street
+commuta_readings_today_20260812_173708.csv,S10,7164,7482,Elizabeth,quieter,Custom House->Paddington
+commuta_readings_today_20260812_173708.csv,S11,7540,7811,Central,busier,Bond Street->Stratford
+commuta_readings_today_20260814_134015.csv,S12,7882,8179,Hammersmith & City,quieter,Paddington->Liverpool Street

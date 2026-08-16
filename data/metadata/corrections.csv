@@ -1,0 +1,69 @@
+source_file,action,start_seq,end_seq,station_id,station_name,note
+commuta_readings_today_20260710_114808.csv,clear_tag,4940,4942,,,false/stale tag
+commuta_readings_today_20260710_114808.csv,clear_tag,4969,4969,,,false/stale tag
+commuta_readings_today_20260710_114808.csv,set_tag,5082,5084,940GZZLUTCR,Tottenham Court Road,buffered row missed selected tag
+commuta_readings_today_20260807_233732.csv,clear_tag,5024,5024,,,false/stale tag
+commuta_readings_today_20260807_233732.csv,clear_tag,5077,5077,,,false/stale tag
+commuta_readings_today_20260807_233732.csv,clear_tag,5194,5198,,,false/stale tag
+commuta_readings_today_20260807_233732.csv,clear_tag,5325,5333,,,false/stale tag
+commuta_readings_today_20260807_233732.csv,clear_tag,5359,5359,,,false/stale tag
+commuta_readings_today_20260807_233732.csv,clear_tag,5533,5534,,,false/stale tag
+commuta_readings_today_20260807_233732.csv,clear_tag,5648,5651,,,false/stale tag
+commuta_readings_today_20260807_233732.csv,clear_tag,5691,5691,,,false/stale tag
+commuta_readings_today_20260807_233732.csv,clear_tag,5708,5708,,,false/stale tag
+commuta_readings_today_20260807_233732.csv,clear_tag,5750,5750,,,false/stale tag
+commuta_readings_today_20260807_233732.csv,clear_tag,5837,5837,,,false/stale tag
+commuta_readings_today_20260807_233732.csv,set_tag,4896,4898,940GZZLUSTD,Stratford,buffered row missed selected tag
+commuta_readings_today_20260807_233732.csv,set_tag,4919,4920,940GZZLUWHM,West Ham,buffered row missed selected tag
+commuta_readings_today_20260807_233732.csv,set_tag,4923,4925,940GZZLUWHM,West Ham,buffered row missed selected tag
+commuta_readings_today_20260807_233732.csv,set_tag,4929,4929,940GZZLUWHM,West Ham,buffered row missed selected tag
+commuta_readings_today_20260807_233732.csv,set_tag,5918,5949,940GZZLUWHM,West Ham,buffered row missed selected tag
+commuta_readings_today_20260807_233732.csv,set_tag,4954,4954,940GZZLUCGT,Canning Town,buffered row missed selected tag
+commuta_readings_today_20260807_233732.csv,set_tag,4959,4962,940GZZLUCGT,Canning Town,buffered row missed selected tag
+commuta_readings_today_20260807_233732.csv,set_tag,4985,4988,940GZZLUNGW,North Greenwich,buffered row missed selected tag
+commuta_readings_today_20260807_233732.csv,set_tag,5628,5628,940GZZLUBND,Bond Street,buffered row missed selected tag
+commuta_readings_today_20260807_233732.csv,set_tag,5656,5656,940GZZLUGPK,Green Park,buffered row missed selected tag
+commuta_readings_today_20260807_233732.csv,set_tag,5674,5674,940GZZLUGPK,Green Park,buffered row missed selected tag
+commuta_readings_today_20260807_233732.csv,set_tag,5719,5719,940GZZLUWLO,Waterloo,buffered row missed selected tag
+commuta_readings_today_20260807_233732.csv,set_tag,5735,5735,940GZZLUSWK,Southwark,buffered row missed selected tag
+commuta_readings_today_20260807_233732.csv,set_tag,5753,5753,940GZZLULNB,London Bridge,buffered row missed selected tag
+commuta_readings_today_20260807_233732.csv,set_tag,5780,5781,940GZZLUBMY,Bermondsey,buffered row missed selected tag
+commuta_readings_today_20260807_233732.csv,set_tag,5823,5823,940GZZLUCYF,Canary Wharf,buffered row missed selected tag
+commuta_readings_today_20260810_184020.csv,clear_tag,6039,6039,,,false/stale tag
+commuta_readings_today_20260810_184020.csv,clear_tag,6246,6251,,,false/stale tag
+commuta_readings_today_20260810_184020.csv,clear_tag,6296,6296,,,false/stale tag
+commuta_readings_today_20260810_184020.csv,clear_tag,6446,6447,,,false/stale tag
+commuta_readings_today_20260810_184020.csv,clear_tag,6647,6647,,,false/stale tag
+commuta_readings_today_20260810_184020.csv,clear_tag,6738,6738,,,false/stale tag
+commuta_readings_today_20260810_184020.csv,clear_tag,6845,6845,,,false/stale tag
+commuta_readings_today_20260810_184020.csv,clear_tag,6864,6865,,,false/stale tag
+commuta_readings_today_20260810_184020.csv,clear_tag,6909,6912,,,false/stale tag
+commuta_readings_today_20260810_184020.csv,clear_tag,6919,6919,,,false/stale tag
+commuta_readings_today_20260810_184020.csv,clear_tag,6976,6976,,,false/stale tag
+commuta_readings_today_20260810_184020.csv,clear_tag,7059,7059,,,false/stale tag
+commuta_readings_today_20260810_184020.csv,clear_tag,7104,7105,,,false/stale tag
+commuta_readings_today_20260810_184020.csv,set_tag,6022,6026,940GZZLUEUS,Euston,buffered row missed selected tag
+commuta_readings_today_20260810_184020.csv,set_tag,6029,6029,940GZZLUEUS,Euston,buffered row missed selected tag
+commuta_readings_today_20260810_184020.csv,set_tag,6876,6876,940GZZLUEUS,Euston,buffered row missed selected tag
+commuta_readings_today_20260810_184020.csv,set_tag,6100,6101,940GZZLUGDG,Goodge Street,buffered row missed selected tag
+commuta_readings_today_20260810_184020.csv,set_tag,6121,6123,940GZZLUTCR,Tottenham Court Road,buffered row missed selected tag
+commuta_readings_today_20260810_184020.csv,set_tag,6170,6172,940GZZLUEMB,Embankment,buffered row missed selected tag
+commuta_readings_today_20260810_184020.csv,set_tag,6491,6491,940GZZLUWRR,Warren Street,buffered row missed selected tag
+commuta_readings_today_20260810_184020.csv,set_tag,6669,6669,940GZZLUKNG,Kennington,buffered row missed selected tag
+commuta_readings_today_20260810_184020.csv,set_tag,6886,6886,940GZZLUPAH,Paddington (H&C Line)-Underground,buffered row missed selected tag
+commuta_readings_today_20260810_184020.csv,set_tag,6890,6890,940GZZLUPAH,Paddington (H&C Line)-Underground,buffered row missed selected tag
+commuta_readings_today_20260812_173708.csv,clear_tag,7277,7279,,,false/stale tag
+commuta_readings_today_20260812_173708.csv,clear_tag,7385,7387,,,false/stale tag
+commuta_readings_today_20260812_173708.csv,clear_tag,7591,7591,,,false/stale tag
+commuta_readings_today_20260812_173708.csv,clear_tag,7697,7699,,,false/stale tag
+commuta_readings_today_20260812_173708.csv,clear_tag,7729,7729,,,false/stale tag
+commuta_readings_today_20260812_173708.csv,clear_tag,7752,7752,,,false/stale tag
+commuta_readings_today_20260812_173708.csv,clear_tag,7779,7780,,,false/stale tag
+commuta_readings_today_20260812_173708.csv,set_tag,7182,7183,910GCUSTMHS,Custom House,buffered row missed selected tag
+commuta_readings_today_20260812_173708.csv,set_tag,7188,7188,910GCUSTMHS,Custom House,buffered row missed selected tag
+commuta_readings_today_20260812_173708.csv,set_tag,7299,7299,910GWCHAPXR,Whitechapel,buffered row missed selected tag
+commuta_readings_today_20260814_134015.csv,clear_tag,7997,7997,,,false/stale tag
+commuta_readings_today_20260814_134015.csv,clear_tag,8036,8036,,,false/stale tag
+commuta_readings_today_20260814_134015.csv,clear_tag,8052,8052,,,false/stale tag
+commuta_readings_today_20260814_134015.csv,clear_tag,8165,8165,,,false/stale tag
+commuta_readings_today_20260814_134015.csv,set_tag,7917,7917,940GZZLUERC,Edgware Road (Circle Line),buffered row missed selected tag

@@ -1,0 +1,60 @@
+line_name,station_id,station_name,platform_regime,line_regime
+Central,940GZZLUSTD,Stratford,open_air,deep_tube_open
+Central,940GZZLUBNK,Bank,underground_no_psd,deep_tube_open
+Central,940GZZLUBLG,Bethnal Green,underground_no_psd,deep_tube_open
+Central,940GZZLUBND,Bond Street,underground_no_psd,deep_tube_open
+Central,940GZZLUCHL,Chancery Lane,underground_no_psd,deep_tube_open
+Central,940GZZLUHBN,Holborn,underground_no_psd,deep_tube_open
+Central,940GZZLULVT,Liverpool Street,underground_no_psd,deep_tube_open
+Central,940GZZLUMED,Mile End,underground_no_psd,deep_tube_open
+Central,940GZZLUOXC,Oxford Circus,underground_no_psd,deep_tube_open
+Central,940GZZLUSPU,St. Paul's,underground_no_psd,deep_tube_open
+Central,940GZZLUTCR,Tottenham Court Road,underground_no_psd,deep_tube_open
+Elizabeth,910GBONDST,Bond Street,full_psd,full_psd_line
+Elizabeth,910GCANWHRF,Canary Wharf,full_psd,full_psd_line
+Elizabeth,910GFRNDXR,Farringdon,full_psd,full_psd_line
+Elizabeth,910GLIVSTLL,Liverpool Street,full_psd,full_psd_line
+Elizabeth,910GPADTLL,Paddington,full_psd,full_psd_line
+Elizabeth,910GTOTCTRD,Tottenham Court Road,full_psd,full_psd_line
+Elizabeth,910GWCHAPXR,Whitechapel,full_psd,full_psd_line
+Elizabeth,910GCUSTMHS,Custom House,open_air,full_psd_line
+Hammersmith & City,940GZZLUBBN,Barbican,open_air,sub_surface
+Hammersmith & City,940GZZLUERC,Edgware Road (Circle Line),open_air,sub_surface
+Hammersmith & City,940GZZLUPAH,Paddington (H&C Line)-Underground,open_air,sub_surface
+Hammersmith & City,940GZZLUFCN,Farringdon,partially_open,sub_surface
+Hammersmith & City,940GZZLUGPS,Great Portland Street,partially_open,sub_surface
+Hammersmith & City,940GZZLULVT,Liverpool Street,partially_open,sub_surface
+Hammersmith & City,940GZZLUBST,Baker Street,underground_no_psd,sub_surface
+Hammersmith & City,940GZZLUESQ,Euston Square,underground_no_psd,sub_surface
+Hammersmith & City,940GZZLUKSX,King's Cross St. Pancras,underground_no_psd,sub_surface
+Hammersmith & City,940GZZLUMGT,Moorgate,underground_no_psd,sub_surface
+Jubilee,940GZZLUCGT,Canning Town,open_air,mixed
+Jubilee,940GZZLUSTD,Stratford,open_air,mixed
+Jubilee,940GZZLUWHM,West Ham,open_air,mixed
+Jubilee,940GZZLUBMY,Bermondsey,train_height_psd,mixed
+Jubilee,940GZZLUCWR,Canada Water,train_height_psd,mixed
+Jubilee,940GZZLUCYF,Canary Wharf,train_height_psd,mixed
+Jubilee,940GZZLULNB,London Bridge,train_height_psd,mixed
+Jubilee,940GZZLUNGW,North Greenwich,train_height_psd,mixed
+Jubilee,940GZZLUSWK,Southwark,train_height_psd,mixed
+Jubilee,940GZZLUWLO,Waterloo,train_height_psd,mixed
+Jubilee,940GZZLUWSM,Westminster,train_height_psd,mixed
+Jubilee,940GZZLUBND,Bond Street,underground_no_psd,mixed
+Jubilee,940GZZLUGPK,Green Park,underground_no_psd,mixed
+Northern,940GZZLUCHX,Charing Cross,underground_no_psd,deep_tube_open
+Northern,940GZZLUEMB,Embankment,underground_no_psd,deep_tube_open
+Northern,940GZZLUEUS,Euston,underground_no_psd,deep_tube_open
+Northern,940GZZLUGDG,Goodge Street,underground_no_psd,deep_tube_open
+Northern,940GZZLUKNG,Kennington,underground_no_psd,deep_tube_open
+Northern,940GZZLULSQ,Leicester Square,underground_no_psd,deep_tube_open
+Northern,940GZZLUTCR,Tottenham Court Road,underground_no_psd,deep_tube_open
+Northern,940GZZLUWRR,Warren Street,underground_no_psd,deep_tube_open
+Northern,940GZZLUWLO,Waterloo,underground_no_psd,deep_tube_open
+Victoria,940GZZLUEUS,Euston,underground_no_psd,deep_tube_open
+Victoria,940GZZLUGPK,Green Park,underground_no_psd,deep_tube_open
+Victoria,940GZZLUOXC,Oxford Circus,underground_no_psd,deep_tube_open
+Victoria,940GZZLUPCO,Pimlico,underground_no_psd,deep_tube_open
+Victoria,940GZZLUSKW,Stockwell,underground_no_psd,deep_tube_open
+Victoria,940GZZLUVXL,Vauxhall,underground_no_psd,deep_tube_open
+Victoria,940GZZLUVIC,Victoria,underground_no_psd,deep_tube_open
+Victoria,940GZZLUWRR,Warren Street,underground_no_psd,deep_tube_open

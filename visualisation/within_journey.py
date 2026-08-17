@@ -142,7 +142,7 @@ def within_journey_fig(seg, ymax, ytick, outfile, med_pos=("right", "top")):
         if loc != "platform":
             continue
         ax.text((x0 + x1) / 2, ymax * 0.985, nm, rotation=90, ha="center",
-                va="top", fontsize=7.5, family=SERIF, color="#3A3733", zorder=7,
+                va="top", fontsize=7.5, family=SANS, color="#3A3733", zorder=7,
                 bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="none", alpha=0.72))
 
     # median annotation box (the refuge / no-refuge point, in numbers)
@@ -151,17 +151,17 @@ def within_journey_fig(seg, ymax, ytick, outfile, med_pos=("right", "top")):
     hx = 0.985 if med_pos[0] == "right" else 0.015
     vy = med_pos[1]
     ax.text(hx, vy, txt, transform=ax.transAxes, ha=med_pos[0], va="top",
-            fontsize=8.5, family=SERIF, color="#3A3733",
+            fontsize=8.5, family=SANS, color="#3A3733",
             bbox=dict(boxstyle="round,pad=0.45", fc="white", ec="#C9C4BC", lw=0.8),
             zorder=8)
 
     ax.set_xlim(0, g["t"].max())
     ax.set_ylim(0, ymax)
     ax.set_yticks(np.arange(0, ymax + 1, ytick))
-    ax.set_xlabel("Elapsed journey time (minutes)", family=SERIF, fontsize=11.5)
-    ax.set_ylabel("PM$_{2.5}$  (µg m$^{-3}$)", family=SERIF, fontsize=12)
+    ax.set_xlabel("Elapsed journey time (minutes)", family=SANS, fontsize=11.5)
+    ax.set_ylabel("PM$_{2.5}$  (µg m$^{-3}$)", family=SANS, fontsize=12)
     ax.set_title(f"{line} line — within-journey PM$_{{2.5}}$ ({grp} session)",
-                 family=SERIF, fontsize=14, loc="left", pad=10)
+                 family=SANS, fontsize=14, loc="left", pad=10)
     for s in ("top", "right"):
         ax.spines[s].set_visible(False)
     ax.spines["left"].set_linewidth(0.8)
@@ -191,4 +191,7 @@ within_journey_fig("S05", ymax=320, ytick=80, outfile="northern_within_journey",
                    med_pos=("right", 0.235))
 # Elizabeth: full PSD; low, rising only at enclosed stations, carriage air cleaner than platform
 within_journey_fig("S10", ymax=70, ytick=10, outfile="elizabeth_within_journey",
+                   med_pos=("right", 0.60))
+# Elizabeth busier session (S03): same 0-70 scale as S10 for direct comparison
+within_journey_fig("S03", ymax=70, ytick=10, outfile="elizabeth_within_journey_busier",
                    med_pos=("right", 0.60))

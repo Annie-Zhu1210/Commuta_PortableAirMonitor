@@ -51,7 +51,7 @@ REGIME_LABEL = {
     "open_air": "Open-air",
     "full_psd": "Full-height PSD",
     "partially_open": "Partially enclosed",
-    "train_height_psd": "Platform-height PSD",
+    "train_height_psd": "Train-height PSD",
     "underground_no_psd": "Enclosed, no PSD",
 }
 REGIME_SEVERITY = ["open_air", "full_psd", "partially_open",

@@ -1,6 +1,4 @@
 """
-Commuta — Section 4 Step 0: Notebook / data-prep pipeline
-=========================================================
 Builds the derived analysis dataset and the stop-level table from the
 untouched clean CSV. The clean CSV is never overwritten.
 

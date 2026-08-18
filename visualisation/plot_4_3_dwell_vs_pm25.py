@@ -116,7 +116,7 @@ ax.set_ylim(2, 340)
 ax.set_xlim(0, 700)
 ax.set_yticks([2, 5, 10, 20, 50, 100, 200])
 ax.get_yaxis().set_major_formatter(ScalarFormatter())
-ax.set_xlabel("Platform dwell time (s)")
+ax.set_xlabel("Platform waiting time (s)")
 ax.set_ylabel(r"Stop-mean PM$_{2.5}$ ($\mu$g m$^{-3}$)")
 
 ax.spines[["top", "right"]].set_visible(False)

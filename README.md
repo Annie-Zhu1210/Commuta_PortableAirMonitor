@@ -92,6 +92,10 @@ Commuta was used to collect PM exposure data across multiple London Underground 
 
 
 <p align="center">
+  <img src="Media/Images/app_home_screen.jpg" alt="Home Screen Hero cards" width="720">
+</p>
+
+<p align="center">
   <img src="Media/results.png" alt="Exposure comparison across lines" width="720">
 </p>
 

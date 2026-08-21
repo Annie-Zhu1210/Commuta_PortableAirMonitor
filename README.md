@@ -54,7 +54,7 @@ The device is built around an ESP32 microcontroller with a stack of I²C sensors
 | Power | 2000 mAh LiPo + MT3608 boost | Portable supply (5 V for the SPS30) |
 
 <p align="center">
-  <img src="Media/Images/hardware.png" alt="Assembled hardware" width="620">
+  <img src="Media/Images/hardware.jpg" alt="Assembled hardware" width="450">
 </p>
 
 ## Enclosure
@@ -62,7 +62,7 @@ The device is built around an ESP32 microcontroller with a stack of I²C sensors
 A custom enclosure houses the electronics and battery in a wearable form factor. CAD and printable files live in [`/enclosure`](enclosure).
 
 <p align="center">
-  <img src="Media/enclosure.png" alt="Enclosure" width="520">
+  <img src="Media/Images/enclosure.png" alt="Enclosure" width="520">
 </p>
 
 ## Repository Structure

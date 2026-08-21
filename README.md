@@ -69,12 +69,13 @@ A custom enclosure houses the electronics and battery in a wearable form factor.
 
 | Folder | Contents |
 |---|---|
-| [`Device/`](Device) | Main device firmware — sensor drivers, logging, and BLE communication (C++ / Arduino); PCB files. |
+| [`Device/`](Device) | Commuta_code folder: Main device firmware — sensor drivers, logging, and BLE communication (C++ / Arduino); PCB folder: schematic and PCB geber files. |
 | [`commuta_app/`](commuta_app) | The Flutter iOS companion app. **See its own [README](commuta_app) for detailed app documentation.** |
 | [`enclosure/`](enclosure) | 3D-printable enclosure files. |
 | [`test_SPS30/`](test_SPS30) | Standalone bring-up sketch for the SPS30 particle sensor. |
 | [`test_PMS5003/`](test_PMS5003) | Early sensor evaluation sketch (PMS5003). |
 | [`Media/`](Media) | Photos, diagrams, and figures. |
+| [`Battery/`](Battery) | Lipo Battery consumpton analysis. |
 
 ## Getting Started
 

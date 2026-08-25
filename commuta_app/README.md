@@ -40,7 +40,7 @@ The Commuta app pairs with the Commuta device over Bluetooth Low Energy and turn
 
 <p align="center">
   <img src="docs/images/google_map.png" alt="Google Maps screen" width="200">
-  <img src="docs/images/google_map_marker.png" alt="Detailed data card on the Google Maps screen" width="200">
+  <img src="docs/images/google_map_data_marker.png" alt="Detailed data card on the Google Maps screen" width="200">
    <img src="docs/images/tfl_map.png" alt="TFL map with manual station selection" width="200">
   <img src="docs/images/tfl_map_data_list.png" alt="Tap a station on the TFL map to see all data collected at this station" width="200">
 </p>

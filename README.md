@@ -28,7 +28,7 @@ The result is a personal, location-aware record of exposure — the kind of data
 - **Full environmental context** — also logs CO₂, temperature, humidity, VOC and NOx indices, and barometric pressure.
 - **Fully portable** — runs off an onboard rechargeable LiPo battery, no wires or phone tether needed to collect data.
 - **On-device logging** — data is buffered to flash storage, so nothing is lost if the phone is out of range.
-- **BLE companion app** — an iOS app receives live readings and lets you mark stations and journeys.
+- **BLE companion app** — a Flutter iOS app with a live air quality score, per-pollutant bands and health advice, maps, history charts, and CSV export ([full feature list](commuta_app#features)).
 - **Discreet by design** — a custom 3D-printed enclosure and minimal indicator LEDs, intended to be worn unobtrusively.
 
 ## How It Works
@@ -69,41 +69,42 @@ A custom enclosure houses the electronics and battery in a wearable form factor.
 
 | Folder | Contents |
 |---|---|
-| [`Device/`](Device) | Commuta_code folder: Main device firmware — sensor drivers, logging, and BLE communication (C++ / Arduino); PCB folder: schematic and PCB geber files. |
-| [`commuta_app/`](commuta_app) | The Flutter iOS companion app. **See its own [README](commuta_app) for detailed app documentation.** |
-| [`enclosure/`](enclosure) | 3D-printable enclosure files. |
+| [`Device/`](Device) | `Commuta_code/`: main device firmware — sensor drivers, logging, and BLE communication (C++ / Arduino). `PCB/`: schematic and PCB gerber files. Plus the [Button & LED reference](Device/Button%26LED.md). |
+| [`commuta_app/`](commuta_app) | The Flutter iOS companion app. **See its own [README](commuta_app) for features, architecture, and setup.** |
+| [`enclosure/`](enclosure) | 3D-printable enclosure — see its [README](enclosure) for what to print and the design history. |
+| [`data/`](data) | Field-study dataset: untouched raw device exports and a fully reproducible raw → clean pipeline — see its [README](data). |
+| [`visualisation/`](visualisation) | Analysis scripts and figures for the Underground PM2.5 case study — see its [README](visualisation) for the script → figure map. |
+| [`Battery/`](Battery) | LiPo battery discharge characterisation — data, script, and [report](Battery/battery_report.md). |
 | [`test_SPS30/`](test_SPS30) | Standalone bring-up sketch for the SPS30 particle sensor. |
 | [`test_PMS5003/`](test_PMS5003) | Early sensor evaluation sketch (PMS5003). |
 | [`Media/`](Media) | Photos, diagrams, and figures. |
-| [`Battery/`](Battery) | Lipo Battery consumpton analysis. |
 
 ## Getting Started
 
 ### Device firmware
-1. Open the sketch in [`Device/`](Device) with the Arduino IDE.
+1. Open the sketch in [`Device/Commuta_code/`](Device/Commuta_code) with the Arduino IDE.
 2. Install the ESP32 board package and the required Sensirion sensor libraries.
-3. Select the **Adafruit HUZZAH32 (ESP32)** board, connect over USB, and flash.
+3. Copy `secrets_example.h` to `secrets.h` and generate your own BLE UUIDs (instructions inside the file). The same UUIDs go into the app's `ble_uuids.dart`.
+4. Select the **Adafruit HUZZAH32 (ESP32)** board, connect over USB, and flash.
 
 ### Companion app
 The iOS app is in [`commuta_app/`](commuta_app). Build and setup instructions are documented in that folder's README.
 
-## Data & Analysis
+## Case Study: PM2.5 on the London Underground
 
-Commuta was used to collect PM exposure data across multiple London Underground lines. The logged data is processed into cleaned datasets and figures comparing exposure across different platform and ventilation environments.
+As its first real-world deployment, Commuta was carried across six London Underground lines to study how line type and platform ventilation design affect commuters' PM2.5 exposure. The full chain is in this repo and is reproducible end to end:
 
+1. **Collect** — the device logs readings during journeys; the app tags stations and exports CSVs.
+2. **Clean** — [`data/`](data) holds the untouched raw exports and a rule-driven pipeline (`python data/process_data.py`) that regenerates the clean dataset from them.
+3. **Analyse** — [`visualisation/`](visualisation) turns the clean data into the study's figures (`python visualisation/step0_dataprep.py`, then any figure script).
 
 <p align="center">
-  <img src="Media/Images/app_home_screen.jpg" alt="Home Screen Hero cards" width="720">
+  <img src="Media/Images/fig_perline_boxplot.png" alt="Platform PM2.5 exposure comparison across Underground lines" width="650">
 </p>
-
-<p align="center">
-  <img src="Media/Images/fig_perline_boxplot.png" alt="Exposure comparison across lines" width="650">
-</p>
-
 
 ## About the Project
 
-Commuta was developed as an MSc dissertation project on the **Connected Environments** programme at **UCL's Centre for Advanced Spatial Analysis (CASA)**.
+Commuta was developed by Annie Zhu as a prototype on the **Connected Environments** programme at **UCL's Centre for Advanced Spatial Analysis (CASA)**; the Underground case study above formed the research component.
 
 🔗 **Project site:** https://annie-zhu1210.github.io/commuta
 

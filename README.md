@@ -47,7 +47,7 @@ The device is built around an ESP32 microcontroller with a stack of I²C sensors
 | Component | Part | Role |
 |---|---|---|
 | Microcontroller | Adafruit HUZZAH32 (ESP32) | Sensing, logging, BLE |
-| Particulate matter | Sensirion **SPS30** | PM1 / PM2.5 / PM4 / PM10 |
+| Particulate matter | Sensirion **SPS30** | PM1 / PM2.5 / PM10 |
 | CO₂ & climate | Sensirion **SCD40** | CO₂, temperature, humidity |
 | Gas indices | Sensirion **SGP41** | VOC index, NOx index |
 | Pressure | Infineon **DPS368** | Barometric pressure |
